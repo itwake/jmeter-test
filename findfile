@@ -1,0 +1,41 @@
+import paramiko
+
+# 服务器列表
+servers = [
+    {'hostname': '192.168.1.1', 'username': 'user1', 'key_path': '/path/to/private_key1'},
+    {'hostname': '192.168.1.2', 'username': 'user2', 'key_path': '/path/to/private_key2'}
+]
+
+# 要执行的命令
+command = 'grep "error" /var/log/syslog'
+
+# 连接到每台服务器并执行命令
+for server in servers:
+    # 创建 SSH 对象
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        # 使用私钥连接
+        key = paramiko.RSAKey.from_private_key_file(server['key_path'])
+        ssh.connect(hostname=server['hostname'], username=server['username'], pkey=key)
+        
+        # 执行命令
+        stdin, stdout, stderr = ssh.exec_command(command)
+        
+        # 获取命令输出
+        output = stdout.read()
+        error = stderr.read()
+
+        # 打印输出结果
+        if output:
+            print(f"Output from {server['hostname']}:\n{output.decode()}")
+        if error:
+            print(f"Errors from {server['hostname']}:\n{error.decode()}")
+
+    except Exception as e:
+        print(f"Failed to connect or execute on {server['hostname']}: {str(e)}")
+    
+    finally:
+        # 关闭连接
+        ssh.close()
