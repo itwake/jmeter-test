@@ -147,11 +147,18 @@ git push origin feature-branch
 
                 const data = await response.json();
 
-                // Handle the response data as needed
-                // For example, display a success message or update the textarea
-                alert('POST request was successful!');
-                // Optionally update the textarea with response data
-                // document.getElementById('content').value = data.code || 'No code returned.';
+                // Check if the JSON contains the downloadUrl
+                if (data.downloadUrl) {
+                    // Create a temporary anchor element to initiate the download
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = data.downloadUrl;
+                    downloadLink.download = ''; // Let the browser decide the filename
+                    document.body.appendChild(downloadLink);
+                    downloadLink.click();
+                    document.body.removeChild(downloadLink);
+                } else {
+                    throw new Error('downloadUrl not found in the response.');
+                }
             } catch (error) {
                 console.error('Request failed:', error);
                 alert(`Request failed: ${error.message}`);
