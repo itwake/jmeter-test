@@ -1,0 +1,94 @@
+pipeline {
+    agent any  // 运行在任何可用的 Jenkins 节点
+
+    environment {
+        GIT_USER = "jenkins-bot"  // Git 提交的用户名
+        GIT_EMAIL = "jenkins-bot@example.com"  // Git 提交的邮箱
+        A_REPO_URL = "git@github.com:user/repoA.git"  // A 仓库地址
+        B_REPO_URL = "git@github.com:user/repoB.git"  // B 仓库地址
+        A_BRANCH = "tf1"  // A 仓库的分支
+        B_BRANCH = "master"  // B 仓库的分支
+        WORKSPACE_DIR = "workspace/git-sync"  // 工作目录
+    }
+
+    stages {
+        stage('清理旧文件') {
+            steps {
+                script {
+                    sh "rm -rf ${WORKSPACE_DIR}"  // 确保工作目录是干净的
+                }
+            }
+        }
+
+        stage('克隆 B 仓库') {
+            steps {
+                script {
+                    sh """
+                        git clone --depth=1 -b ${B_BRANCH} ${B_REPO_URL} ${WORKSPACE_DIR}
+                        cd ${WORKSPACE_DIR}
+                        git config user.name "${GIT_USER}"
+                        git config user.email "${GIT_EMAIL}"
+                    """
+                }
+            }
+        }
+
+        stage('添加 A 作为远程仓库') {
+            steps {
+                script {
+                    sh """
+                        cd ${WORKSPACE_DIR}
+                        git remote add A ${A_REPO_URL} || true  # 如果已存在，不报错
+                        git fetch A ${A_BRANCH}
+                    """
+                }
+            }
+        }
+
+        stage('同步 A 的提交到 B') {
+            steps {
+                script {
+                    sh """
+                        cd ${WORKSPACE_DIR}
+                        git checkout ${B_BRANCH}
+                        git rebase A/${A_BRANCH} || (git rebase --abort && exit 1)
+                    """
+                }
+            }
+        }
+
+        stage('自动解决冲突，使用 A 仓库的版本') {
+            steps {
+                script {
+                    sh """
+                        cd ${WORKSPACE_DIR}
+                        # 使用 'theirs' 解决冲突，保留 A 仓库的版本
+                        git diff --name-only --diff-filter=U | xargs git checkout --theirs
+                        git add .
+                    """
+                }
+            }
+        }
+
+        stage('继续 rebase 并推送到 B') {
+            steps {
+                script {
+                    sh """
+                        cd ${WORKSPACE_DIR}
+                        git rebase --continue || (git rebase --abort && exit 1)
+                        git push origin ${B_BRANCH} --force-with-lease
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ 成功同步 A:${A_BRANCH} → B:${B_BRANCH}，所有冲突已自动解决并推送到 B。"
+        }
+        failure {
+            echo "❌ 失败！同步过程中出现了问题，可能是其他冲突或配置问题，请手动检查 B 仓库。"
+        }
+    }
+}
