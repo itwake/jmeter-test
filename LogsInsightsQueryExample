@@ -1,0 +1,49 @@
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.cloudwatchlogs.model.*;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+public class LogsInsightsQueryExample {
+
+    private static final String LOG_GROUP = "/aws/lambda/my-function";
+    private static final String QUERY_STRING = "fields @timestamp, @message | filter @message like /error/i | sort @timestamp desc | limit 20";
+
+    public static void main(String[] args) throws InterruptedException {
+        CloudWatchLogsClient logsClient = CloudWatchLogsClient.create();
+
+        long startTime = Instant.now().minusSeconds(300).toEpochMilli(); // 过去5分钟
+        long endTime = Instant.now().toEpochMilli();
+
+        // 启动查询
+        StartQueryRequest startQueryRequest = StartQueryRequest.builder()
+                .logGroupName(LOG_GROUP)
+                .startTime(startTime)
+                .endTime(endTime)
+                .queryString(QUERY_STRING)
+                .build();
+
+        StartQueryResponse startQueryResponse = logsClient.startQuery(startQueryRequest);
+        String queryId = startQueryResponse.queryId();
+        System.out.println("Started query with ID: " + queryId);
+
+        // 轮询查询结果
+        GetQueryResultsResponse resultsResponse;
+        QueryStatus status;
+        do {
+            TimeUnit.SECONDS.sleep(2); // 等待2秒后再查询结果
+            resultsResponse = logsClient.getQueryResults(GetQueryResultsRequest.builder()
+                    .queryId(queryId)
+                    .build());
+            status = resultsResponse.status();
+            System.out.println("查询状态: " + status);
+        } while (status == QueryStatus.RUNNING || status == QueryStatus.SCHEDULED);
+
+        // 输出结果
+        System.out.println("=== 查询结果 ===");
+        for (ResultField field : resultsResponse.results().stream().flatMap(List::stream).toList()) {
+            System.out.println(field.field() + ": " + field.value());
+        }
+    }
+}
