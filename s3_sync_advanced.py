@@ -45,20 +45,26 @@ def list_local_files(folder):
             }
     return files
 
+
 def list_s3_files(s3, bucket):
     paginator = s3.get_paginator("list_objects_v2")
     page_iterator = paginator.paginate(Bucket=bucket)
     files = {}
     for page in page_iterator:
         for obj in page.get("Contents", []):
-            files[obj["Key"]] = {
-                "etag": obj["ETag"].strip('"'),
-                "last_modified": obj["LastModified"]
-            }
+            key = obj["Key"]
+            try:
+                meta = s3.head_object(Bucket=bucket, Key=key)
+                files[key] = {
+                    "etag": meta["ETag"].strip('"'),
+                    "last_modified": meta["LastModified"],
+                    "md5": meta["Metadata"].get("md5")
+                }
+            except Exception as e:
+                continue
     return files
-
 def upload_file(s3, bucket, key, path):
-    s3.upload_file(path, bucket, key, ExtraArgs={"ServerSideEncryption": "aws:kms"})
+    s3.upload_file(path, bucket, key, ExtraArgs={"ServerSideEncryption": "aws:kms", "Metadata": {"md5": md5_checksum(path)}})
     logger.info(f"Uploaded: {key}")
 
 def download_file(s3, bucket, key, path):
