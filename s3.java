@@ -1,24 +1,19 @@
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
-import software.amazon.awssdk.core.ResponseInputStream;
-import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.*;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import java.util.concurrent.CompletableFuture;
 
-public class S3SelectExample {
+public class S3SelectAsyncExample {
     public static void main(String[] args) {
-        String bucket = "my-bucket";
-        String key = "sample-data.csv";
+        String bucket = "your-bucket-name";
+        String key = "your-object-key";
 
-        // 初始化 S3 客户端（使用默认配置文件）
-        S3Client s3 = S3Client.builder()
+        S3AsyncClient s3AsyncClient = S3AsyncClient.builder()
                 .credentialsProvider(ProfileCredentialsProvider.create())
                 .build();
 
-        // 构建 SelectObjectContent 请求
-        SelectObjectContentRequest selectRequest = SelectObjectContentRequest.builder()
+        SelectObjectContentRequest request = SelectObjectContentRequest.builder()
                 .bucket(bucket)
                 .key(key)
                 .expression("SELECT * FROM S3Object s WHERE s.age > 30")
@@ -32,18 +27,35 @@ public class S3SelectExample {
                         .build())
                 .build();
 
-        try (ResponseInputStream<SelectObjectContentResponse> result = s3.selectObjectContent(selectRequest);
-             BufferedReader reader = new BufferedReader(new InputStreamReader(result))) {
-
-            String line;
-            System.out.println("Query Results:");
-            while ((line = reader.readLine()) != null) {
-                System.out.println(line);
+        CompletableFuture<SelectObjectContentResponse> future = s3AsyncClient.selectObjectContent(request, new SelectObjectContentResponseHandler() {
+            @Override
+            public void responseReceived(SelectObjectContentResponse response) {
+                // 处理响应元数据
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
 
-        s3.close();
+            @Override
+            public void onEventStream(SdkPublisher<SelectObjectContentEventStream> publisher) {
+                publisher.subscribe(event -> {
+                    if (event instanceof RecordsEvent) {
+                        RecordsEvent recordsEvent = (RecordsEvent) event;
+                        // 处理返回的记录
+                        System.out.println(new String(recordsEvent.payload().asByteArray()));
+                    }
+                });
+            }
+
+            @Override
+            public void exceptionOccurred(Throwable throwable) {
+                throwable.printStackTrace();
+            }
+
+            @Override
+            public void complete() {
+                System.out.println("SelectObjectContent completed");
+            }
+        });
+
+        future.join(); // 等待操作完成
+        s3AsyncClient.close();
     }
 }
