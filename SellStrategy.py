@@ -1,87 +1,133 @@
 import time
 import datetime
+import random
 import requests
 
-def get_index_status():
-    """
-    TODO: 用真实接口替换此处 stub。
-    应返回字典，格式例如：
+class SellStrategy:
+    def __init__(self,
+                 m: int = 100,
+                 n: int = 10,
+                 t_minutes: int = 10,
+                 p: float = 1.2,
+                 request_interval: float = 2.0):
+        # 参数初始化
+        self.total_shares = m
+        self.shares_remaining = m
+        self.n = n
+        self.p = p
+        self.request_interval = request_interval
+
+        # 时间控制
+        self.start_trading_dt: datetime.datetime = None
+        self.last_datetime: datetime.datetime = None
+        self.total_duration = datetime.timedelta(minutes=t_minutes)
+        self.segment_duration = self.total_duration / n
+        # 在最后一分钟之前强制清仓
+        self.final_cleanup_threshold = self.total_duration - datetime.timedelta(minutes=1)
+
+        # 分段测量和状态
+        self.measurement_data = {i: [] for i in range(n)}
+        self.sold_segments = set()
+
+    def get_index_status(self) -> dict:
+        """
+        TODO: 用真实接口替换此处 stub。
+        期望返回格式：
         {
-            "current": float,            # 当前价格
-            "dateTime": "YYYYmmddHHMMSSfff",  # 时间戳
-            "status": "S"|"T"|"E"        # S=开盘前, T=交易中, E=交易后
+            "current": float,             # 当前价格
+            "dateTime": "YYYYmmddHHMMSSfff",  # 服务器时间戳
+            "status": "S"|"T"|"E"
         }
-    """
-    # 示例 stub（请替换为真实请求）
-    # resp = requests.get("https://api.example.com/index_status").json()
-    # return resp
-    return {
-        "current": 18500.0,
-        "dateTime": datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3],
-        "status": "T"
-    }
+        """
+        # —— 示例 stub：随机波动模拟 —— 
+        now = datetime.datetime.now()
+        price = 18500 + random.uniform(-20, 20)
+        return {
+            "current": price,
+            "dateTime": now.strftime("%Y%m%d%H%M%S%f")[:-3],
+            "status": "T"  # 始终视为可交易，用真实接口会返回 S/T/E
+        }
 
-def sell(volume):
-    """
-    TODO: 用真实卖出接口替换此处。
-    """
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{now} 卖出 {volume} 手")
+    def sell(self, volume: int):
+        """
+        TODO: 用真实卖出接口替换此处。
+        """
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{ts} 卖出 {volume} 手")
 
-def sell_strategy(n, m, t_minutes, p, request_interval=2):
-    """
-    分 n 批卖出 m 手，总时长 t_minutes 分钟。
-    每批基础卖出量 z = m // n，剩余的放在最后一批一起卖。
-    每段时长 d = t_minutes*60 / n 秒。
-    在每段的前半段读取数据，算出平均价 a；
-    在后半段检测实时价 ≥ a * p 时，卖出 z。
-    在总时长结束前 1 分钟，强制清仓剩余所有手数。
-    """
-    shares_remaining = m
-    z = m // n
-    total_sec = t_minutes * 60
-    segment_sec = total_sec / n
-    start_ts = time.time()
+    def sell_strategy(self):
+        info = self.get_index_status()
+        status = info["status"]
+        dt_str = info["dateTime"]
+        current_price = info["current"]
 
-    for i in range(n):
-        seg_start = start_ts + i * segment_sec
-        measure_end = seg_start + (segment_sec / 2)
-        decision_end = seg_start + segment_sec
+        # 解析服务器时间戳
+        current_dt = datetime.datetime.strptime(dt_str, "%Y%m%d%H%M%S%f")
 
-        # 前半段：采集价格，计算平均价
-        prices = []
-        while time.time() < measure_end:
-            info = get_index_status()
-            if info["status"] == "T":
-                prices.append(info["current"])
-            time.sleep(request_interval)
-        avg_price = sum(prices) / len(prices) if prices else None
+        # 跳过重复或延迟数据
+        if self.last_datetime and current_dt <= self.last_datetime:
+            return ["hold", 0]
+        self.last_datetime = current_dt
 
-        # 后半段：达到阈值则卖出 z
-        while time.time() < decision_end and shares_remaining > 0 and avg_price is not None:
-            info = get_index_status()
-            if info["status"] != "T":
-                time.sleep(request_interval)
-                continue
-            current_price = info["current"]
-            if current_price >= avg_price * p:
-                sell(z)
-                shares_remaining -= z
-                break
-            time.sleep(request_interval)
+        # 仅在交易状态可卖
+        if status != "T":
+            return ["hold", 0]
 
-    # 在总时长结束前 1 分钟，强制清仓剩余手数
-    final_deadline = start_ts + total_sec - 60
-    while time.time() < final_deadline:
-        time.sleep(request_interval)
-    if shares_remaining > 0:
-        sell(shares_remaining)
-        shares_remaining = 0
+        # 首次遇到 T 时，记录交易开始时间
+        if self.start_trading_dt is None:
+            self.start_trading_dt = current_dt
+
+        elapsed = current_dt - self.start_trading_dt
+
+        # —— 最后 1 分钟前的终极清仓 —— 
+        if elapsed >= self.final_cleanup_threshold and self.shares_remaining > 0:
+            to_sell = self.shares_remaining
+            self.shares_remaining = 0
+            return ["sell", to_sell]
+
+        # 计算当前属于第几段（0 到 n-1）
+        segment_index = int(elapsed / self.segment_duration)
+        if segment_index >= self.n:
+            segment_index = self.n - 1
+
+        seg_start = self.start_trading_dt + segment_index * self.segment_duration
+        seg_mid   = seg_start + (self.segment_duration / 2)
+        seg_end   = seg_start + self.segment_duration
+
+        # —— 测量阶段（前半段）：收集价格 —— 
+        if current_dt <= seg_mid:
+            self.measurement_data[segment_index].append(current_price)
+            return ["hold", 0]
+
+        # —— 决策阶段（后半段）—— 
+        # 还没对本段出手过
+        if segment_index not in self.sold_segments:
+            prices = self.measurement_data[segment_index]
+            if prices:
+                avg_price = sum(prices) / len(prices)
+                # 1) 如果价格达到阈值，立即卖出本段量
+                if current_price >= avg_price * self.p:
+                    z = self.total_shares // self.n
+                    to_sell = min(z, self.shares_remaining)
+                    self.shares_remaining -= to_sell
+                    self.sold_segments.add(segment_index)
+                    return ["sell", to_sell]
+            # 2) 否则如果已过本段末尾，还未卖，则强制卖出
+            if current_dt >= seg_end:
+                z = self.total_shares // self.n
+                to_sell = min(z, self.shares_remaining)
+                self.shares_remaining -= to_sell
+                self.sold_segments.add(segment_index)
+                return ["sell", to_sell]
+
+        # 默认不卖
+        return ["hold", 0]
+
 
 if __name__ == "__main__":
-    # 初始化参数
-    m = 100           # 总份额
-    n = 10            # 分批次数
-    t_minutes = 10    # 总时长（分钟）
-    p = 1.20          # 阈值系数（平均价的120%即20%涨幅）
-    sell_strategy(n=n, m=m, t_minutes=t_minutes, p=p, request_interval=2)
+    # 默认参数：m=100, n=10, t=10min, p=1.2 (即 20% 阈值), request_interval=2 秒
+    strategy = SellStrategy()
+    while strategy.shares_remaining > 0:
+        action, vol = strategy.sell_strategy()
+        print(f"{strategy.last_datetime} → {action} {vol}手，剩余 {strategy.shares_remaining}手")
+        time.sleep(strategy.request_interval)
