@@ -6,7 +6,9 @@ class SellStrategy:
     def __init__(self, total_shares=100):
         self.shares_remaining = total_shares
         self.prices = []
-        self.last_datetime = None  # 用于记录上次拉取的时间戳
+        self.last_datetime = None             # 上次拉取的时间戳
+        self.start_trading_dt = None          # 记录第一次 T 状态时的时间
+        self.trading_duration = datetime.timedelta(minutes=10)
 
     def get_index_status(self):
         """
@@ -18,16 +20,12 @@ class SellStrategy:
                 "status": "S" | "T" | "E"
             }
         """
-        # 示例返回，实际请调用：requests.get(...).json()
-        return {"current": 18500.0,
-                "dateTime": datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3],
-                "status": "T"}
+        resp = requests.get("https://api.example.com/index_status").json()
+        return resp
 
     def decide_sell_volume(self, current_price: float) -> int:
         """
-        简单局部高点逻辑示例：
-        - 如果当前价 >= 历史最高价，则卖出最多 10 手
-        - 否则不卖
+        简单“局部高点”示例：若达到历史最高价，则卖出最多 10 手。
         """
         if self.prices and current_price >= max(self.prices):
             return min(10, self.shares_remaining)
@@ -37,22 +35,29 @@ class SellStrategy:
         info = self.get_index_status()
 
         # 1. 解析并更新最新时间戳
-        dt_str = info["dateTime"]  # 例如 "20250512221246000"
+        dt_str = info["dateTime"]  # e.g. "20250512221246000"
         current_dt = datetime.datetime.strptime(dt_str, "%Y%m%d%H%M%S%f")
-        # 如果新拉取的时间不比上次晚，视为重复或延迟数据，直接 hold
         if self.last_datetime and current_dt <= self.last_datetime:
-            return ["hold", 0]
+            return ["hold", 0]      # 重复或延迟数据，skip
         self.last_datetime = current_dt
 
         status = info["status"]
-        # 2. 根据状态决定只能在 T 时卖出
-        if status == "S":
-            return ["hold", 0]
-        if status == "E":
-            # 交易已结束，无法再卖
+        if status != "T":
+            # 未开盘或已结束，都不卖
             return ["hold", 0]
 
-        # 3. status == "T" 时的卖出逻辑
+        # 2. 首次进入 T 状态，记录交易开始时间
+        if self.start_trading_dt is None:
+            self.start_trading_dt = current_dt
+
+        # 3. 计算已交易时长，若 ≥ 10 分钟，强制清仓
+        elapsed = current_dt - self.start_trading_dt
+        if elapsed >= self.trading_duration and self.shares_remaining > 0:
+            vol = self.shares_remaining
+            self.shares_remaining = 0
+            return ["sell", vol]
+
+        # 4. 常规分批卖出逻辑
         current_price = info["current"]
         self.prices.append(current_price)
         to_sell = self.decide_sell_volume(current_price)
@@ -62,15 +67,15 @@ class SellStrategy:
         else:
             return ["hold", 0]
 
+
 # —— 使用示例 —— 
 strategy = SellStrategy(100)
 start = time.time()
 while strategy.shares_remaining > 0:
     action, vol = strategy.sell_strategy()
     print(f"{strategy.last_datetime} → {action}, {vol}手，剩余 {strategy.shares_remaining}手")
-    # 每2秒拉一次
     time.sleep(2)
-    # 如果不想无限等，也可以加个超时判断：
+    # 防止意外死循环：超过10分钟还未清仓，就跳出
     if time.time() - start > 10 * 60:
-        print("超时，交易结束前清仓失败！")
+        print("超时，未能在10分钟内清仓！")
         break
