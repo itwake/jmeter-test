@@ -5,58 +5,66 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import classification_report
 
 # 1. 数据加载
-# 假设 df.csv 包含字段：
-# dateTime,status,current,change,percent,high,low,turnover
 df = pd.read_csv("hsi_history.csv",
                  parse_dates=["dateTime"],
                  dtype={"status": str})
 
-# 只保留可交易状态
+# 保留可交易状态
 df = df[df["status"] == "T"].reset_index(drop=True)
 
-# 2. 特征工程
+# 2. 类型转换 & 原始特征
+df["price"]    = df["current"].astype(float)
+df["change"]   = df["change"].astype(float)
+df["percent"]  = df["percent"].astype(float)  # 已经是百分数形式，如 -1.5
+df["high_o"]   = df["high"].astype(float)
+df["low_o"]    = df["low"].astype(float)
+df["turnover"] = df["turnover"].astype(float)
+
+# 3. 滑动窗口特征
 window = 60  # 60秒窗口
-df["price"] = df["current"].astype(float)
-
-# 短期特征
-df["mean_60"] = df["price"].rolling(window).mean()
-df["std_60"]  = df["price"].rolling(window).std()
-df["max_60"]  = df["price"].rolling(window).max()
-df["min_60"]  = df["price"].rolling(window).min()
-
-# 相对位置
-df["zscore"] = (df["price"] - df["mean_60"]) / df["std_60"]
-df["hl_ratio"] = (df["price"] - df["min_60"]) / (df["max_60"] - df["min_60"] + 1e-9)
-
-# 动量：当前价与 window 秒前价之差
+df["mean_60"]     = df["price"].rolling(window).mean()
+df["std_60"]      = df["price"].rolling(window).std()
+df["max_60"]      = df["price"].rolling(window).max()
+df["min_60"]      = df["price"].rolling(window).min()
 df["momentum_60"] = df["price"] - df["price"].shift(window)
 
-# 删除空值行
+# 4. 技术比率特征
+df["zscore"]   = (df["price"] - df["mean_60"]) / df["std_60"]
+df["hl_ratio"] = (df["price"] - df["min_60"]) / (df["max_60"] - df["min_60"] + 1e-9)
+
+# 5. 日内位置特征
+df["pos_high"] = (df["price"] - df["low_o"]) / (df["high_o"] - df["low_o"] + 1e-9)
+df["vol_ratio"]= df["turnover"] / (df["turnover"].rolling(window).mean() + 1e-9)
+
+# 6. 丢弃空值
 df = df.dropna().reset_index(drop=True)
 
-# 3. 标签设计：未来 ΔT 秒内下跌超过 0.2% 即标记为 “Sell”
-delta_t = 10  # 秒
-theta = 0.002  # 0.2%
-# 先构造未来价格列
+# 7. 标签：未来 ΔT 秒内跌超 0.2% 标为 “Sell”
+delta_t = 10
+theta   = 0.002
 df["future_min"] = df["price"].rolling(delta_t, min_periods=1).min().shift(-delta_t)
 df["label"] = np.where(
     (df["future_min"] - df["price"]) / df["price"] <= -theta,
-    1,  # Sell
-    0   # Hold
+    1, 0
 )
 df = df.dropna(subset=["label"]).reset_index(drop=True)
 
-# 4. 准备训练集与测试集（时间序列切分）
-features = ["price", "mean_60", "std_60", "max_60", "min_60",
-            "zscore", "hl_ratio", "momentum_60"]
+# 8. 准备训练与测试
+features = [
+    "price", "change", "percent",
+    "high_o", "low_o", "turnover",
+    "mean_60", "std_60", "max_60", "min_60",
+    "momentum_60", "zscore", "hl_ratio",
+    "pos_high", "vol_ratio"
+]
 X = df[features]
 y = df["label"]
 
 tscv = TimeSeriesSplit(n_splits=5)
 reports = []
-for train_idx, test_idx in tscv.split(X):
-    X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
-    y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+for tr_idx, te_idx in tscv.split(X):
+    X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
+    y_tr, y_te = y.iloc[tr_idx], y.iloc[te_idx]
 
     lgb_train = lgb.Dataset(X_tr, label=y_tr)
     lgb_eval  = lgb.Dataset(X_te, label=y_te, reference=lgb_train)
@@ -82,41 +90,41 @@ for train_idx, test_idx in tscv.split(X):
         verbose_eval=False
     )
 
-    # 预测与评估
     y_pred = (gbm.predict(X_te, num_iteration=gbm.best_iteration) > 0.5).astype(int)
-    report = classification_report(y_te, y_pred, output_dict=True)
-    reports.append(report)
+    reports.append(classification_report(y_te, y_pred, output_dict=True))
 
-# 汇总各折 F1-score
-df_report = pd.DataFrame(reports)[["0", "1"]].applymap(lambda x: x["f1-score"])
-print("各折 Sell 类别(F1) 与 Hold 类别(F1):")
+# 输出各折 F1-score
+df_report = pd.DataFrame(reports)[["0", "1"]].applymap(lambda m: m["f1-score"])
+print("各折 Hold/Sell F1-score：")
 print(df_report)
 
-# 5. 在线预测接口示例
-def should_sell(latest_batch: pd.DataFrame, model: lgb.Booster) -> bool:
-    """
-    :param latest_batch: 包含最近 window 秒的原始数据 DataFrame，
-                         字段需与训练时一致
-    :param model: 训练好的 LightGBM 模型
-    :return: True=Sell, False=Hold
-    """
-    # 在此重新计算特征
-    X_new = pd.DataFrame({
-        "price": latest_batch["current"].astype(float),
-        "mean_60": latest_batch["current"].astype(float).rolling(window).mean(),
-        "std_60":  latest_batch["current"].astype(float).rolling(window).std(),
-        "max_60":  latest_batch["current"].astype(float).rolling(window).max(),
-        "min_60":  latest_batch["current"].astype(float).rolling(window).min(),
-    })
-    X_new["zscore"] = (X_new["price"] - X_new["mean_60"]) / X_new["std_60"]
-    X_new["hl_ratio"] = (X_new["price"] - X_new["min_60"]) / (X_new["max_60"] - X_new["min_60"] + 1e-9)
-    X_new["momentum_60"] = X_new["price"] - X_new["price"].shift(window)
-    X_new = X_new.dropna().iloc[[-1]]  # 取最后一行
+# 9. 在线预测示例
+def should_sell(latest: pd.DataFrame, model: lgb.Booster) -> bool:
+    # latest: 最近 window 秒的原始 DataFrame，含 current, change, percent, high, low, turnover
+    latest = latest.copy()
+    latest["price"]    = latest["current"].astype(float)
+    latest["change"]   = latest["change"].astype(float)
+    latest["percent"]  = latest["percent"].astype(float)
+    latest["high_o"]   = latest["high"].astype(float)
+    latest["low_o"]    = latest["low"].astype(float)
+    latest["turnover"] = latest["turnover"].astype(float)
 
+    latest["mean_60"]     = latest["price"].rolling(window).mean()
+    latest["std_60"]      = latest["price"].rolling(window).std()
+    latest["max_60"]      = latest["price"].rolling(window).max()
+    latest["min_60"]      = latest["price"].rolling(window).min()
+    latest["momentum_60"] = latest["price"] - latest["price"].shift(window)
+
+    latest["zscore"]   = (latest["price"] - latest["mean_60"]) / latest["std_60"]
+    latest["hl_ratio"] = (latest["price"] - latest["min_60"]) / (latest["max_60"] - latest["min_60"] + 1e-9)
+    latest["pos_high"] = (latest["price"] - latest["low_o"]) / (latest["high_o"] - latest["low_o"] + 1e-9)
+    latest["vol_ratio"]= latest["turnover"] / (latest["turnover"].rolling(window).mean() + 1e-9)
+
+    X_new = latest.dropna().iloc[[-1]][features]
     prob = model.predict(X_new)[0]
-    return prob > 0.5  # 阈值可调
+    return prob > 0.5
 
-# 保存 & 加载模型
+# 保存模型
 gbm.save_model("hsi_sell_model.txt")
-# later...
+# 加载模型示例
 # model = lgb.Booster(model_file="hsi_sell_model.txt")
