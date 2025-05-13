@@ -1,8 +1,8 @@
 import logging
 import pandas as pd
 import numpy as np
-from lightgbm import LGBMClassifier
-from sklearn.model_selection import train_test_split, TimeSeriesSplit
+from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 
 # 1. 日志配置
@@ -52,7 +52,7 @@ df["label"] = np.where(
 df = df.dropna(subset=["label"]).reset_index(drop=True)
 logger.info("Final dataset for modeling: %d samples", len(df))
 
-# 5. 划分训练/测试集（时间序列切分）
+# 5. 划分训练/测试集
 features = [
     "price", "change", "percent", "high_o", "low_o", "turnover",
     "mean_60", "std_60", "max_60", "min_60",
@@ -61,11 +61,9 @@ features = [
 ]
 X = df[features]
 y = df["label"]
-
-# 这里先做一次简单的时间序列分割，保留最末一段做最终验证
-split_point = int(len(df) * 0.8)
-X_train, X_test = X.iloc[:split_point], X.iloc[split_point:]
-y_train, y_test = y.iloc[:split_point], y.iloc[split_point:]
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, shuffle=False
+)
 logger.info("Train/Test split: %d / %d", len(X_train), len(X_test))
 
 # 6. 模型定义
@@ -77,17 +75,19 @@ model = LGBMClassifier(
     num_leaves=31,
     feature_fraction=0.8,
     bagging_fraction=0.8,
-    bagging_freq=5,
-    verbose=-1
+    bagging_freq=5
 )
 
-# 7. 训练 & 早停
-logger.info("Begin training with early stopping on validation set")
+# 7. 训练：使用 callbacks 启用早停和静默输出 :contentReference[oaicite:0]{index=0}
+callbacks = [
+    early_stopping(stopping_rounds=20, first_metric_only=True, verbose=False),
+    log_evaluation(period=0)
+]
+logger.info("Begin training with early stopping (callbacks)")
 model.fit(
     X_train, y_train,
     eval_set=[(X_test, y_test)],
-    early_stopping_rounds=20,
-    verbose=False
+    callbacks=callbacks
 )
 logger.info("Training completed. Best iteration: %d", model.best_iteration_)
 
@@ -99,6 +99,6 @@ cm     = confusion_matrix(y_test, y_pred)
 logger.info("Classification Report:\n%s", report)
 logger.info("Confusion Matrix:\n%s", cm)
 
-# 如果需要，也可以保存模型
+# 9. 保存模型
 model.booster_.save_model("hsi_sell_model.txt")
 logger.info("Model saved to hsi_sell_model.txt")
