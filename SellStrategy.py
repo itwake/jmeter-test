@@ -10,7 +10,6 @@ class SellStrategy:
                  window_size=5,        # 滑动窗口大小
                  batch_count=5,        # 分几批
                  request_interval=2,   # 秒
-                 p_base=0.20,          # 基础阈值 20%
                  morning_return=-0.017 # 上午涨跌幅（负数表示跌）
                  ):
         # —— 原有属性 —— 
@@ -24,15 +23,14 @@ class SellStrategy:
         self.last_datetime = None
         self.request_interval = request_interval
 
-        # —— 新增：阈值与动量参数 —— 
-        self.p_base = p_base
+        # —— 新增：早盘动量 —— 
         self.morning_return = morning_return
 
         # —— 新增：权重分批 —— 
         # 默认权重：前两批 15%，后面均分
         w = [0.15, 0.15] + [ (1-0.30)/(batch_count-2) ]*(batch_count-2)
         self.w = np.array(w)
-        # 如果上午跌幅大于 1.5%，就加速出货（前几批权重再放大）
+        # 上午大跌时加速出货
         if self.morning_return < -0.015:
             self.w[:3] *= 1.2
             self.w[3:] *= 0.8
@@ -41,15 +39,6 @@ class SellStrategy:
     def get_index_status(self):
         # TODO: 替换成真实的 HTTP 请求
         return requests.get("https://api.example.com/index_status").json()
-
-    def current_threshold(self):
-        """根据最近波动率动态修正 p"""
-        prices = list(self.price_window)
-        if len(prices) < 2:
-            return self.p_base
-        sigma = np.std(prices) / np.mean(prices)   # 相对波动率
-        k = 0.5   # 调整系数
-        return self.p_base * (1 + k * sigma)
 
     def sell_strategy(self):
         info = self.get_index_status()
@@ -88,16 +77,14 @@ class SellStrategy:
                 return ["sell", vol]
             return ["hold", 0]
 
-        # 计算动态阈值
-        p = self.current_threshold()
-        # 本地窗口最高价 * (1 + p)
-        high_bar = max(self.price_window) * (1 + p)
+        # 本地窗口最高价
+        local_high = max(self.price_window)
 
         to_sell = 0
-        # 1) 碰到“窗口高点+阈值” 且未达目标 → 卖阶段剩余目标
-        if current_price >= high_bar and unsold_target > 0:
+        # 1) 碰到窗口高点且未达目标 → 卖出未完成部分
+        if current_price >= local_high and unsold_target > 0:
             to_sell = unsold_target
-        # 2) 或者到了本阶段时间末尾但还没卖够 → 也要卖
+        # 2) 或者到了本阶段时间末尾但还没卖够 → 卖出未完成部分
         elif elapsed >= (phase + 1) * self.batch_duration and unsold_target > 0:
             to_sell = unsold_target
         # 3) 保护：超过总时长后全部清仓
@@ -118,7 +105,6 @@ strategy = SellStrategy(
     window_size=5,
     batch_count=5,
     request_interval=2,
-    p_base=0.20,
     morning_return=-0.017
 )
 
