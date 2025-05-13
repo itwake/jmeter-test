@@ -1,133 +1,128 @@
-import time
 import datetime
-import random
+import time
 import requests
+from collections import deque
+import numpy as np
 
 class SellStrategy:
     def __init__(self,
-                 m: int = 100,
-                 n: int = 10,
-                 t_minutes: int = 10,
-                 p: float = 1.2,
-                 request_interval: float = 2.0):
-        # 参数初始化
-        self.total_shares = m
-        self.shares_remaining = m
-        self.n = n
-        self.p = p
+                 total_shares=100,
+                 window_size=5,        # 滑动窗口大小
+                 batch_count=5,        # 分几批
+                 request_interval=2,   # 秒
+                 p_base=0.20,          # 基础阈值 20%
+                 morning_return=-0.017 # 上午涨跌幅（负数表示跌）
+                 ):
+        # —— 原有属性 —— 
+        self.total_shares = total_shares
+        self.shares_remaining = total_shares
+        self.price_window = deque(maxlen=window_size)
+        self.start_trading_dt = None
+        self.trading_duration = datetime.timedelta(minutes=10)
+        self.batch_count = batch_count
+        self.batch_duration = self.trading_duration / batch_count
+        self.last_datetime = None
         self.request_interval = request_interval
 
-        # 时间控制
-        self.start_trading_dt: datetime.datetime = None
-        self.last_datetime: datetime.datetime = None
-        self.total_duration = datetime.timedelta(minutes=t_minutes)
-        self.segment_duration = self.total_duration / n
-        # 在最后一分钟之前强制清仓
-        self.final_cleanup_threshold = self.total_duration - datetime.timedelta(minutes=1)
+        # —— 新增：阈值与动量参数 —— 
+        self.p_base = p_base
+        self.morning_return = morning_return
 
-        # 分段测量和状态
-        self.measurement_data = {i: [] for i in range(n)}
-        self.sold_segments = set()
+        # —— 新增：权重分批 —— 
+        # 默认权重：前两批 15%，后面均分
+        w = [0.15, 0.15] + [ (1-0.30)/(batch_count-2) ]*(batch_count-2)
+        self.w = np.array(w)
+        # 如果上午跌幅大于 1.5%，就加速出货（前几批权重再放大）
+        if self.morning_return < -0.015:
+            self.w[:3] *= 1.2
+            self.w[3:] *= 0.8
+            self.w /= self.w.sum()
 
-    def get_index_status(self) -> dict:
-        """
-        TODO: 用真实接口替换此处 stub。
-        期望返回格式：
-        {
-            "current": float,             # 当前价格
-            "dateTime": "YYYYmmddHHMMSSfff",  # 服务器时间戳
-            "status": "S"|"T"|"E"
-        }
-        """
-        # —— 示例 stub：随机波动模拟 —— 
-        now = datetime.datetime.now()
-        price = 18500 + random.uniform(-20, 20)
-        return {
-            "current": price,
-            "dateTime": now.strftime("%Y%m%d%H%M%S%f")[:-3],
-            "status": "T"  # 始终视为可交易，用真实接口会返回 S/T/E
-        }
+    def get_index_status(self):
+        # TODO: 替换成真实的 HTTP 请求
+        return requests.get("https://api.example.com/index_status").json()
 
-    def sell(self, volume: int):
-        """
-        TODO: 用真实卖出接口替换此处。
-        """
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"{ts} 卖出 {volume} 手")
+    def current_threshold(self):
+        """根据最近波动率动态修正 p"""
+        prices = list(self.price_window)
+        if len(prices) < 2:
+            return self.p_base
+        sigma = np.std(prices) / np.mean(prices)   # 相对波动率
+        k = 0.5   # 调整系数
+        return self.p_base * (1 + k * sigma)
 
     def sell_strategy(self):
         info = self.get_index_status()
-        status = info["status"]
-        dt_str = info["dateTime"]
-        current_price = info["current"]
-
-        # 解析服务器时间戳
-        current_dt = datetime.datetime.strptime(dt_str, "%Y%m%d%H%M%S%f")
-
-        # 跳过重复或延迟数据
+        current_dt = datetime.datetime.strptime(info["dateTime"], "%Y%m%d%H%M%S%f")
+        # 防止重复数据
         if self.last_datetime and current_dt <= self.last_datetime:
             return ["hold", 0]
         self.last_datetime = current_dt
 
-        # 仅在交易状态可卖
-        if status != "T":
+        # 只在 T 状态下可交易
+        if info["status"] != "T":
             return ["hold", 0]
 
-        # 首次遇到 T 时，记录交易开始时间
+        # 记录交易开始时间
         if self.start_trading_dt is None:
             self.start_trading_dt = current_dt
 
         elapsed = current_dt - self.start_trading_dt
+        phase = min(int(elapsed / self.batch_duration), self.batch_count - 1)
 
-        # —— 最后 1 分钟前的终极清仓 —— 
-        if elapsed >= self.final_cleanup_threshold and self.shares_remaining > 0:
-            to_sell = self.shares_remaining
-            self.shares_remaining = 0
-            return ["sell", to_sell]
+        # 根据权重算出该阶段累计应卖出的总量
+        target_cumulative = int(self.total_shares * self.w[: phase+1].sum())
+        already_sold = self.total_shares - self.shares_remaining
+        unsold_target = target_cumulative - already_sold
 
-        # 计算当前属于第几段（0 到 n-1）
-        segment_index = int(elapsed / self.segment_duration)
-        if segment_index >= self.n:
-            segment_index = self.n - 1
+        # 更新滑动窗口
+        current_price = info["current"]
+        self.price_window.append(current_price)
 
-        seg_start = self.start_trading_dt + segment_index * self.segment_duration
-        seg_mid   = seg_start + (self.segment_duration / 2)
-        seg_end   = seg_start + self.segment_duration
-
-        # —— 测量阶段（前半段）：收集价格 —— 
-        if current_dt <= seg_mid:
-            self.measurement_data[segment_index].append(current_price)
+        # 如果窗口还没满，就先等
+        if len(self.price_window) < self.price_window.maxlen:
+            # 到结束前 1 分钟强制清仓
+            if elapsed >= self.trading_duration and self.shares_remaining > 0:
+                vol = self.shares_remaining
+                self.shares_remaining = 0
+                return ["sell", vol]
             return ["hold", 0]
 
-        # —— 决策阶段（后半段）—— 
-        # 还没对本段出手过
-        if segment_index not in self.sold_segments:
-            prices = self.measurement_data[segment_index]
-            if prices:
-                avg_price = sum(prices) / len(prices)
-                # 1) 如果价格达到阈值，立即卖出本段量
-                if current_price >= avg_price * self.p:
-                    z = self.total_shares // self.n
-                    to_sell = min(z, self.shares_remaining)
-                    self.shares_remaining -= to_sell
-                    self.sold_segments.add(segment_index)
-                    return ["sell", to_sell]
-            # 2) 否则如果已过本段末尾，还未卖，则强制卖出
-            if current_dt >= seg_end:
-                z = self.total_shares // self.n
-                to_sell = min(z, self.shares_remaining)
-                self.shares_remaining -= to_sell
-                self.sold_segments.add(segment_index)
-                return ["sell", to_sell]
+        # 计算动态阈值
+        p = self.current_threshold()
+        # 本地窗口最高价 * (1 + p)
+        high_bar = max(self.price_window) * (1 + p)
 
-        # 默认不卖
-        return ["hold", 0]
+        to_sell = 0
+        # 1) 碰到“窗口高点+阈值” 且未达目标 → 卖阶段剩余目标
+        if current_price >= high_bar and unsold_target > 0:
+            to_sell = unsold_target
+        # 2) 或者到了本阶段时间末尾但还没卖够 → 也要卖
+        elif elapsed >= (phase + 1) * self.batch_duration and unsold_target > 0:
+            to_sell = unsold_target
+        # 3) 保护：超过总时长后全部清仓
+        elif elapsed >= self.trading_duration and self.shares_remaining > 0:
+            to_sell = self.shares_remaining
+
+        if to_sell > 0:
+            to_sell = min(to_sell, self.shares_remaining)
+            self.shares_remaining -= to_sell
+            return ["sell", to_sell]
+        else:
+            return ["hold", 0]
 
 
-if __name__ == "__main__":
-    # 默认参数：m=100, n=10, t=10min, p=1.2 (即 20% 阈值), request_interval=2 秒
-    strategy = SellStrategy()
-    while strategy.shares_remaining > 0:
-        action, vol = strategy.sell_strategy()
-        print(f"{strategy.last_datetime} → {action} {vol}手，剩余 {strategy.shares_remaining}手")
-        time.sleep(strategy.request_interval)
+# 使用示例（每 2 秒调用一次）：
+strategy = SellStrategy(
+    total_shares=100,
+    window_size=5,
+    batch_count=5,
+    request_interval=2,
+    p_base=0.20,
+    morning_return=-0.017
+)
+
+while strategy.shares_remaining > 0:
+    action, vol = strategy.sell_strategy()
+    print(f"{strategy.last_datetime} → {action} {vol}手，剩余 {strategy.shares_remaining}手")
+    time.sleep(strategy.request_interval)
