@@ -1,4 +1,4 @@
-strategy_multi_return.py (多次高位卖出改进)
+# strategy_multi_return.py (多次高点卖出改进，修复 preds 定义)
 import logging
 import datetime
 import time
@@ -76,7 +76,8 @@ class MultiHorizonReturnSell:
         if (self.last_dt and now <= self.last_dt) or info['status'] != 'T':
             return ['hold', 0]
         self.last_dt = now
-        # 2. 初始化段与极值
+
+        # 2. 初始化分段与极值
         if self.start_dt is None:
             self.start_dt = now
             self.segment_start = now
@@ -84,34 +85,40 @@ class MultiHorizonReturnSell:
             self.segment_max = price
             self.segment_min = price
             self.pred_high_time = None
+
         elapsed = now - self.start_dt
         sold = self.total_shares - self.shares_remaining
-        # 更新段内最值
+        # 更新段内极值
         self.segment_max = max(self.segment_max, price)
         self.segment_min = min(self.segment_min, price)
-        # 3. 基线量
+
+        # 3. 计算基线卖出量
         t_sec = min(elapsed, self.effective_duration).total_seconds()
         base_cum = int(self.total_shares * t_sec / self.effective_duration.total_seconds())
         unsold_base = max(base_cum - sold, 0)
         to_sell = 0
-        # 4. 预测高点记录
+
+        # 4. 预测高点记录，并保留 preds 和 predicted_prices
         feat = self.make_features(info)
+        preds = None
+        predicted_prices = None
         if feat is not None and self.pred_high_time is None:
             preds = self.model.predict(feat)[0]
             predicted_prices = price * (1 + preds)
             idx = int(np.argmax(predicted_prices))
             offset = self.horizons_sec[idx]
             self.pred_high_time = now + datetime.timedelta(seconds=int(offset))
-            logger.info("预测高点时间：%s", self.pred_high_time.strftime('%H:%M:%S'))
-        # 5. 在高点处分多次卖出：
-        #    每次到达预测高点前，若价格接近高点阈值则按基线卖一批
-        if self.pred_high_time and now <= self.pred_high_time:
-            threshold_price = 0.99 * price * (1 + preds[np.argmax(predicted_prices)])
+            logger.info("预测高点价格：%.2f, 时间：%s", predicted_prices[idx], self.pred_high_time.strftime('%H:%M:%S'))
+
+        # 5. 在预测高点前，价格接近预测高点处分多次卖出基线
+        if self.pred_high_time and preds is not None and predicted_prices is not None and now <= self.pred_high_time:
+            threshold_price = 0.99 * predicted_prices[np.argmax(predicted_prices)]
             if price >= threshold_price and unsold_base > 0:
                 to_sell = unsold_base
-                logger.info("高位预卖: 卖出 %d 股", to_sell)
+                logger.info("高位预卖: 卖出 %d 股 @%.2f", to_sell, price)
                 # 重置，等待下次高点
                 self.pred_high_time = None
+
         # 6. 段尾补基线
         if now > self.segment_end:
             to_sell = max(to_sell, unsold_base)
@@ -120,9 +127,11 @@ class MultiHorizonReturnSell:
             self.segment_max = price
             self.segment_min = price
             self.pred_high_time = None
-        # 7. 缓冲结束清仓
+
+        # 7. 缓冲期结束清仓
         if elapsed >= self.effective_duration:
             to_sell = self.shares_remaining
+
         # 8. 执行卖出
         if to_sell > 0:
             vol = min(to_sell, self.shares_remaining)
