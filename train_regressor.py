@@ -1,93 +1,4 @@
-# train_multi_return.py
-import logging
-import pandas as pd
-import numpy as np
-import pickle
-from sklearn.model_selection import train_test_split
-from sklearn.multioutput import MultiOutputRegressor
-from lightgbm import LGBMRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-
-# 日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger(__name__)
-
-# 超参数
-request_interval = 2  # 秒
-# 多时点预测步数（2s、6s、10s）
-horizons = {"2s": 1, "6s": 3, "10s": 5}
-# 特征窗口长度（秒）
-feat_windows = {"10s": 10, "20s": 20, "30s": 30}
-window_counts = {k: int(v / request_interval) for k, v in feat_windows.items()}
-
-def main():
-    # 1. 数据加载
-    logger.info("加载历史数据并预处理")
-    df = pd.read_csv("hsi_history.csv", parse_dates=["dateTime"], dtype={"status": str})
-    df = df[df["status"] == "T"].reset_index(drop=True)
-    df["price"] = df["current"].astype(float)
-    df["change"] = df["change"].astype(float)
-    df["percent"] = df["percent"].astype(float)
-
-    # 2. 构造特征
-    logger.info("构造窗口特征: %s 样本点", window_counts)
-    for name, cnt in window_counts.items():
-        df[f"mean_{name}"] = df["price"].rolling(cnt).mean()
-        df[f"std_{name}"] = df["price"].rolling(cnt).std()
-        df[f"price_{name}_ago"] = df["price"].shift(cnt)
-    df = df.dropna().reset_index(drop=True)
-    logger.info("特征构造后样本数: %d", len(df))
-
-    # 3. 构造相对收益标签
-    logger.info("构造相对收益标签: %s", horizons)
-    for label, step in horizons.items():
-        df[f"ret_{label}"] = (df["price"].shift(-step) - df["price"]) / df["price"]
-    df = df.dropna().reset_index(drop=True)
-    logger.info("标签构造后样本数: %d", len(df))
-
-    # 4. 划分数据集
-    feature_cols = ["price", "change", "percent"] + \
-                   [f"mean_{w}" for w in feat_windows] + \
-                   [f"std_{w}" for w in feat_windows] + \
-                   [f"price_{w}_ago" for w in feat_windows]
-    target_cols = [f"ret_{h}" for h in horizons]
-    X = df[feature_cols]; Y = df[target_cols]
-    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, shuffle=False)
-    logger.info("训练/测试集: %d / %d", len(X_train), len(X_test))
-
-    # 5. 训练多输出回归模型
-    base = LGBMRegressor(
-        boosting_type="gbdt", objective="regression",
-        learning_rate=0.05, n_estimators=300,
-        num_leaves=31, feature_fraction=0.8,
-        bagging_fraction=0.8, bagging_freq=5
-    )
-    model = MultiOutputRegressor(base)
-    logger.info("训练多输出回归模型")
-    model.fit(X_train, y_train)
-    logger.info("训练完成")
-
-    # 6. 模型评估
-    y_pred = pd.DataFrame(model.predict(X_test), columns=target_cols)
-    for col in target_cols:
-        mae = mean_absolute_error(y_test[col], y_pred[col])
-        rmse = np.sqrt(mean_squared_error(y_test[col], y_pred[col]))
-        logger.info("%s -> MAE=%.4f, RMSE=%.4f", col, mae, rmse)
-
-    # 7. 保存模型
-    with open("multi_horizon_return_model.pkl", "wb") as f:
-        pickle.dump(model, f)
-    logger.info("模型已保存至 multi_horizon_return_model.pkl")
-
-if __name__ == '__main__':
-    main()
-
-
-# strategy_multi_return.py (高位清仓触发)
+strategy_multi_return.py (多次高位卖出改进)
 import logging
 import datetime
 import time
@@ -132,7 +43,7 @@ class MultiHorizonReturnSell:
         # 预测高点记录
         self.horizons_sec = np.array([2, 6, 10])
         self.pred_high_time = None
-        # 模型加载
+        # 加载模型
         with open(model_path, 'rb') as f:
             self.model = pickle.load(f)
         logger.info("加载模型 %s", model_path)
@@ -161,11 +72,11 @@ class MultiHorizonReturnSell:
         info = self.get_index_status()
         now = datetime.datetime.strptime(info['dateTime'], '%Y%m%d%H%M%S%f')
         price = float(info['current'])
-        # 去重与非交易
+        # 1. 去重 & 非交易
         if (self.last_dt and now <= self.last_dt) or info['status'] != 'T':
             return ['hold', 0]
         self.last_dt = now
-        # 初始化分段与高低点
+        # 2. 初始化段与极值
         if self.start_dt is None:
             self.start_dt = now
             self.segment_start = now
@@ -175,14 +86,15 @@ class MultiHorizonReturnSell:
             self.pred_high_time = None
         elapsed = now - self.start_dt
         sold = self.total_shares - self.shares_remaining
-        # 更新段内极值
+        # 更新段内最值
         self.segment_max = max(self.segment_max, price)
         self.segment_min = min(self.segment_min, price)
-        # 基线量
+        # 3. 基线量
         t_sec = min(elapsed, self.effective_duration).total_seconds()
         base_cum = int(self.total_shares * t_sec / self.effective_duration.total_seconds())
         unsold_base = max(base_cum - sold, 0)
-        # 首次预测并记录高点时间
+        to_sell = 0
+        # 4. 预测高点记录
         feat = self.make_features(info)
         if feat is not None and self.pred_high_time is None:
             preds = self.model.predict(feat)[0]
@@ -191,23 +103,27 @@ class MultiHorizonReturnSell:
             offset = self.horizons_sec[idx]
             self.pred_high_time = now + datetime.timedelta(seconds=int(offset))
             logger.info("预测高点时间：%s", self.pred_high_time.strftime('%H:%M:%S'))
-        to_sell = 0
-        # 在预测高点时间到来时，一次性清仓
-        if self.pred_high_time and now >= self.pred_high_time:
-            to_sell = self.shares_remaining
-            logger.info("到达预测高点，清仓剩余 %d 股", to_sell)
-        # 段尾补基线
-        elif now > self.segment_end:
+        # 5. 在高点处分多次卖出：
+        #    每次到达预测高点前，若价格接近高点阈值则按基线卖一批
+        if self.pred_high_time and now <= self.pred_high_time:
+            threshold_price = 0.99 * price * (1 + preds[np.argmax(predicted_prices)])
+            if price >= threshold_price and unsold_base > 0:
+                to_sell = unsold_base
+                logger.info("高位预卖: 卖出 %d 股", to_sell)
+                # 重置，等待下次高点
+                self.pred_high_time = None
+        # 6. 段尾补基线
+        if now > self.segment_end:
             to_sell = max(to_sell, unsold_base)
             self.segment_start = self.segment_end
             self.segment_end = self.segment_start + self.batch_duration
             self.segment_max = price
             self.segment_min = price
             self.pred_high_time = None
-        # 缓冲结束清仓
+        # 7. 缓冲结束清仓
         if elapsed >= self.effective_duration:
             to_sell = self.shares_remaining
-        # 执行
+        # 8. 执行卖出
         if to_sell > 0:
             vol = min(to_sell, self.shares_remaining)
             self.shares_remaining -= vol
