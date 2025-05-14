@@ -17,14 +17,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 超参数
-request_interval = 2  # 秒
-# 多时点预测步数（2s、6s、10s）
-horizons = {"2s": 1, "6s": 3, "10s": 5}
-# 特征窗口长度（秒）
-feat_windows = {"10s": 10, "20s": 20, "30s": 30}
-window_counts = {k: int(v / request_interval) for k, v in feat_windows.items()}
-
 def main():
+    request_interval = 2  # 秒
+    # 多时点预测步数（2s、6s、10s）
+    horizons = {"2s": 1, "6s": 3, "10s": 5}
+    # 特征窗口长度（秒）
+    feat_windows = {"10s": 10, "20s": 20, "30s": 30}
+    window_counts = {k: int(v / request_interval) for k, v in feat_windows.items()}
+
     # 1. 数据加载
     logger.info("加载历史数据并预处理")
     df = pd.read_csv("hsi_history.csv", parse_dates=["dateTime"], dtype={"status": str})
@@ -33,7 +33,7 @@ def main():
     df["change"] = df["change"].astype(float)
     df["percent"] = df["percent"].astype(float)
 
-    # 2. 构造特征
+    # 2. 构造滚动与滞后特征
     logger.info("构造窗口特征: %s 样本点", window_counts)
     for name, cnt in window_counts.items():
         df[f"mean_{name}"] = df["price"].rolling(cnt).mean()
@@ -42,7 +42,7 @@ def main():
     df = df.dropna().reset_index(drop=True)
     logger.info("特征构造后样本数: %d", len(df))
 
-    # 3. 构造回报标签
+    # 3. 构造相对收益标签
     logger.info("构造相对收益标签: %s", horizons)
     for label, step in horizons.items():
         df[f"ret_{label}"] = (df["price"].shift(-step) - df["price"]) / df["price"]
@@ -87,7 +87,7 @@ if __name__ == '__main__':
     main()
 
 
-# strategy_multi_return.py  (含延迟补偿)
+# strategy_multi_return.py (含延迟补偿)
 import logging
 import datetime
 import time
@@ -110,34 +110,28 @@ class MultiHorizonReturnSell:
         self, total_shares=100, window_size=30,
         batch_count=5, request_interval=2,
         model_path="multi_horizon_return_model.pkl",
-        buffer_minutes=1,
-        latency_alpha=0.1
+        buffer_minutes=1
     ):
-        # 卖出与时长参数
+        # 参数
         self.total_shares = total_shares
         self.shares_remaining = total_shares
         self.batch_count = batch_count
         self.request_interval = request_interval
+        # 时间
         self.trading_duration = datetime.timedelta(minutes=10)
         self.clear_buffer = datetime.timedelta(minutes=buffer_minutes)
         self.effective_duration = self.trading_duration - self.clear_buffer
         self.batch_duration = self.effective_duration / batch_count
-        # 时间与分段追踪
-        self.start_dt = None
-        self.last_dt = None
-        self.segment_start = None
-        self.segment_end = None
-        self.segment_max = -np.inf
-        self.segment_min = np.inf
-        # 特征窗口
+        # 跟踪
+        self.start_dt = None; self.last_dt = None
+        self.segment_start = None; self.segment_end = None
+        self.segment_max = -np.inf; self.segment_min = np.inf
+        # 窗口
         self.price_window = deque(maxlen=window_size)
-        # 延迟补偿
-        self.avg_latency = 0.0
-        self.latency_alpha = latency_alpha
         # 加载模型
         with open(model_path, 'rb') as f:
             self.model = pickle.load(f)
-        logger.info("加载模型 %s，延迟补偿初始α=%.2f", model_path, latency_alpha)
+        logger.info("加载模型 %s", model_path)
 
     def get_index_status(self):
         return requests.get("https://api.example.com/index_status").json()
@@ -151,7 +145,7 @@ class MultiHorizonReturnSell:
         arr = np.array(self.price_window)
         windows = {'10s':10, '20s':20, '30s':30}
         feats = {'price':price, 'change':change, 'percent':percent}
-        for name, w in windows.items():
+        for name,w in windows.items():
             vals = arr[-w:]
             feats[f'mean_{name}'] = float(vals.mean())
             feats[f'std_{name}'] = float(vals.std())
@@ -159,64 +153,62 @@ class MultiHorizonReturnSell:
         return pd.DataFrame([feats])
 
     def sell_strategy(self):
-        # 发出请求并测量延迟
-        send_ts = time.time()
         info = self.get_index_status()
-        recv_ts = time.time()
-        # 更新平均延迟
-        latency = recv_ts - send_ts
-        self.avg_latency = self.latency_alpha * latency + (1 - self.latency_alpha) * self.avg_latency
-        # 解析并补偿时间戳
-        current_dt = datetime.datetime.strptime(info['dateTime'], '%Y%m%d%H%M%S%f')
-        comp_dt = current_dt + datetime.timedelta(seconds=self.avg_latency)
+        now = datetime.datetime.strptime(info['dateTime'], '%Y%m%d%H%M%S%f')
         price = float(info['current'])
-        # 去重与状态
-        if (self.last_dt and comp_dt <= self.last_dt) or info['status'] != 'T':
+        # 去重 & 状态
+        if (self.last_dt and now <= self.last_dt) or info['status']!='T':
             return ['hold', 0]
-        self.last_dt = comp_dt
+        self.last_dt = now
         # 初始化分段
         if self.start_dt is None:
-            self.start_dt = comp_dt
-            self.segment_start = comp_dt
-            self.segment_end = comp_dt + self.batch_duration
+            self.start_dt = now
+            self.segment_start = now
+            self.segment_end = now + self.batch_duration
             self.segment_max = price; self.segment_min = price
-        elapsed = comp_dt - self.start_dt
+        elapsed = now - self.start_dt
         sold = self.total_shares - self.shares_remaining
         # 更新段极值
         self.segment_max = max(self.segment_max, price)
         self.segment_min = min(self.segment_min, price)
-        # 基线计算
+        # 基线量
         t_sec = min(elapsed, self.effective_duration).total_seconds()
         base_cum = int(self.total_shares * t_sec / self.effective_duration.total_seconds())
         unsold_base = max(base_cum - sold, 0)
-        # 特征与预测
+        # 特征 & 预测（含延迟补偿）
         feat = self.make_features(info)
         sell_due_to_model = False
         if feat is not None:
-            preds = self.model.predict(feat)[0]
-            if preds[0] >= preds[1] or preds[1] >= preds[2]:
+            # 测量预测延迟
+            start_t = time.time()
+            preds = self.model.predict(feat)[0]  # ret_2s,ret_6s,ret_10s
+            latency = time.time() - start_t
+            # 延迟补偿：线性放大预测回报
+            horizons = np.array([1,3,5]) * self.request_interval
+            adjusted = preds * ((horizons + latency) / horizons)
+            # 峰值判断
+            if adjusted[0] >= adjusted[1] or adjusted[1] >= adjusted[2]:
                 sell_due_to_model = True
         # 决策
         to_sell = 0
-        # 模型触发
+        # 模型触发补阶段目标
         if sell_due_to_model:
-            phase_idx = min(int(elapsed / self.batch_duration), self.batch_count - 1)
-            phase_tgt = int(self.total_shares * (phase_idx + 1) / self.batch_count)
+            phase_idx = min(int(elapsed/self.batch_duration), self.batch_count-1)
+            phase_tgt = int(self.total_shares*(phase_idx+1)/self.batch_count)
             unsold_phase = max(phase_tgt - sold, 0)
             to_sell = max(to_sell, unsold_phase)
-        # 段内高点触发并动态加码
-        if comp_dt <= self.segment_end:
+        # 分段高点基线触发加码
+        if now <= self.segment_end:
             if unsold_base > 0 and price >= self.segment_max:
                 strength = (price - self.segment_min) / (self.segment_max - self.segment_min + 1e-9)
                 extra = int(strength * unsold_base)
                 to_sell = max(to_sell, unsold_base + extra)
         else:
             to_sell = max(to_sell, unsold_base)
-            # 下一段重置
             self.segment_start = self.segment_end
             self.segment_end = self.segment_start + self.batch_duration
             self.segment_max = price; self.segment_min = price
-        # 缓冲清仓
+        # 缓冲结束清仓
         if elapsed >= self.effective_duration:
             to_sell = self.shares_remaining
         # 执行卖出
@@ -224,8 +216,8 @@ class MultiHorizonReturnSell:
             vol = min(to_sell, self.shares_remaining)
             self.shares_remaining -= vol
             logger.info(
-                "%s → SELL %d @%.2f (lat=%.3fs, base=%d, extra=%d)",
-                comp_dt.strftime('%H:%M:%S'), vol, price, self.avg_latency, unsold_base, max(to_sell-unsold_base,0)
+                "%s → SELL %d @%.2f (base=%d, extra=%d, latency=%.3fs)",
+                now.strftime('%H:%M:%S'), vol, price, unsold_base, max(to_sell-unsold_base,0), latency if feat is not None else 0
             )
             return ['sell', vol]
         return ['hold', 0]
