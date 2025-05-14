@@ -19,7 +19,7 @@ class SellStrategy:
     def __init__(
         self,
         total_shares=100,
-        window_size=30,         # 滑动窗口长度（秒），此处改为30秒
+        window_size=30,         # 滑动窗口长度（秒），用于特征重建，最大30秒
         batch_count=5,
         request_interval=2,
         model_path="hsi_price_model.pkl",
@@ -49,7 +49,7 @@ class SellStrategy:
         self.start_dt = None
         self.last_dt  = None
 
-        # 滑动窗口用于特征
+        # 滑动窗口，用于特征（单位：数据点数）
         self.price_window = deque(maxlen=window_size)
 
         # 加载模型
@@ -65,7 +65,7 @@ class SellStrategy:
 
     def make_features(self, info):
         """
-        构造特征：当前值与30秒窗口的均值、波动、以及30秒前价格
+        构造特征：当前值，以及最近10s/20s/30s的均值、标准差和相应的滞后价格
         """
         price   = float(info["current"])
         change  = float(info["change"])
@@ -77,20 +77,22 @@ class SellStrategy:
             return None
 
         arr = np.array(self.price_window)
-        feats = {
-            "price": price,
-            "change": change,
-            "percent": percent,
-            "mean_30s": arr.mean(),
-            "std_30s": arr.std(),
-            "price_30s_ago": arr[0]
-        }
+        # 短周期窗口长度（数据点数，对应秒数）
+        windows = {"10s": 10, "20s": 20, "30s": 30}
+
+        feats = {"price": price, "change": change, "percent": percent}
+        for name, w in windows.items():
+            vals = arr[-w:]
+            feats[f"mean_{name}"]      = float(vals.mean())
+            feats[f"std_{name}"]       = float(vals.std())
+            feats[f"price_{name}_ago"] = float(arr[-w])
+
         return pd.DataFrame([feats])
 
     def sell_strategy(self):
         """
-        卖出策略：每次获取数据 -> 特征 -> 预测 -> 决策
-        返回 ["sell", volume] 或 ["hold", 0]
+        卖出策略：获取行情 -> 特征 -> 预测 -> 卖出决策
+        返回 ["sell", vol] 或 ["hold", 0]
         """
         info = self.get_index_status()
         current_dt = datetime.datetime.strptime(
@@ -119,7 +121,7 @@ class SellStrategy:
         req_cum = int(self.total_shares * t_sec / eff_sec)
         unsold_req = max(req_cum - sold, 0)
 
-        # 特征构造
+        # 构造特征
         feat = self.make_features(info)
         if feat is None:
             # 到缓冲结束 -> 清仓
@@ -146,13 +148,13 @@ class SellStrategy:
         pred_price = self.model.predict(feat)[0]
         pred_ret = (pred_price - current_price) / current_price
 
-        # 决策：基线 + 如果预测下跌，则加速卖出
+        # 决策：基线 + 预测触发
         to_sell = unsold_req
         if pred_ret <= 0:
             phase_idx = min(int(elapsed / self.batch_duration), self.batch_count - 1)
             phase_target = int(self.total_shares * (phase_idx + 1) / self.batch_count)
-            unsold_phase = max(phase_target - sold, 0)
-            to_sell = max(to_sell, unsold_phase)
+            unsold_ph = max(phase_target - sold, 0)
+            to_sell = max(to_sell, unsold_ph)
 
         # 到缓冲结束 -> 清仓
         if elapsed >= self.effective_duration:
