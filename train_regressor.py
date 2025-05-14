@@ -21,7 +21,8 @@ class MultiHorizonReturnSell:
         self, total_shares=100, window_size=30,
         batch_count=5, request_interval=2,
         model_path="multi_horizon_return_model.pkl",
-        buffer_minutes=1
+        buffer_minutes=1,
+        sell_multiplier=1.5     # 加速因子：基线卖出量乘以此值
     ):
         # 参数与时间管理
         self.total_shares = total_shares
@@ -32,6 +33,8 @@ class MultiHorizonReturnSell:
         self.clear_buffer = datetime.timedelta(minutes=buffer_minutes)
         self.effective_duration = self.trading_duration - self.clear_buffer
         self.batch_duration = self.effective_duration / batch_count
+        # 加速因子
+        self.sell_multiplier = sell_multiplier
         # 初始跟踪
         self.start_dt = None
         self.last_dt = None
@@ -48,102 +51,58 @@ class MultiHorizonReturnSell:
             self.model = pickle.load(f)
         logger.info("加载模型 %s", model_path)
 
-    def get_index_status(self):
-        return requests.get("https://api.example.com/index_status").json()
-
-    def make_features(self, info):
-        price = float(info['current'])
-        change = float(info['change'])
-        percent = float(info['percent'])
-        self.price_window.append(price)
-        if len(self.price_window) < self.price_window.maxlen:
-            return None
-        arr = np.array(self.price_window)
-        windows = {'10s':10, '20s':20, '30s':30}
-        feats = {'price':price, 'change':change, 'percent':percent}
-        for name, w in windows.items():
-            vals = arr[-w:]
-            feats[f'mean_{name}'] = float(vals.mean())
-            feats[f'std_{name}'] = float(vals.std())
-            feats[f'price_{name}_ago'] = float(arr[-w])
-        return pd.DataFrame([feats])
-
     def sell_strategy(self):
-        info = self.get_index_status()
-        now = datetime.datetime.strptime(info['dateTime'], '%Y%m%d%H%M%S%f')
-        price = float(info['current'])
-        # 1. 去重 & 非交易
-        if (self.last_dt and now <= self.last_dt) or info['status'] != 'T':
-            return ['hold', 0]
-        self.last_dt = now
-
-        # 2. 初始化分段与极值
-        if self.start_dt is None:
-            self.start_dt = now
-            self.segment_start = now
-            self.segment_end = now + self.batch_duration
-            self.segment_max = price
-            self.segment_min = price
-            self.pred_high_time = None
-
-        elapsed = now - self.start_dt
-        sold = self.total_shares - self.shares_remaining
-        # 更新段内极值
-        self.segment_max = max(self.segment_max, price)
-        self.segment_min = min(self.segment_min, price)
-
-        # 3. 计算基线卖出量
+        # ... 前面代码不变直到 unsold_base 计算...
+        # 3. 计算基线卖出量并应用加速因子
         t_sec = min(elapsed, self.effective_duration).total_seconds()
         base_cum = int(self.total_shares * t_sec / self.effective_duration.total_seconds())
         unsold_base = max(base_cum - sold, 0)
-        to_sell = 0
+        # 加速基线卖出
+        base_to_sell = int(unsold_base * self.sell_multiplier)
+        to_sell = max(to_sell, base_to_sell)
 
-        # 4. 预测高点记录，并保留 preds 和 predicted_prices
-        feat = self.make_features(info)
-        preds = None
-        predicted_prices = None
-        if feat is not None and self.pred_high_time is None:
-            preds = self.model.predict(feat)[0]
-            predicted_prices = price * (1 + preds)
-            idx = int(np.argmax(predicted_prices))
-            offset = self.horizons_sec[idx]
-            self.pred_high_time = now + datetime.timedelta(seconds=int(offset))
-            logger.info("预测高点价格：%.2f, 时间：%s", predicted_prices[idx], self.pred_high_time.strftime('%H:%M:%S'))
+        # 窗口高位加码卖出
+        win_arr = np.array(self.price_window)
+        if unsold_base > 0 and win_arr.size > 0:
+            thresh = np.percentile(win_arr, 80)
+            if price >= thresh:
+                strength = (price - thresh) / (self.segment_max - thresh + 1e-9)
+                extra = int(strength * unsold_base)
+                to_sell = max(to_sell, base_to_sell + extra)
+            elif price >= self.segment_max:
+                to_sell = max(to_sell, base_to_sell)
 
-        # 5. 在预测高点前，价格接近预测高点处分多次卖出基线
-        if self.pred_high_time and preds is not None and predicted_prices is not None and now <= self.pred_high_time:
-            threshold_price = 0.99 * predicted_prices[np.argmax(predicted_prices)]
-            if price >= threshold_price and unsold_base > 0:
-                to_sell = unsold_base
-                logger.info("高位预卖: 卖出 %d 股 @%.2f", to_sell, price)
-                # 重置，等待下次高点
-                self.pred_high_time = None
-
-        # 6. 段尾补基线
+        # 段尾补基线
         if now > self.segment_end:
-            to_sell = max(to_sell, unsold_base)
+            to_sell = max(to_sell, base_to_sell)
+            # 进入下一段
             self.segment_start = self.segment_end
             self.segment_end = self.segment_start + self.batch_duration
             self.segment_max = price
             self.segment_min = price
             self.pred_high_time = None
 
-        # 7. 缓冲期结束清仓
+        # 缓冲结束清仓
         if elapsed >= self.effective_duration:
             to_sell = self.shares_remaining
 
-        # 8. 执行卖出
+        # 执行卖出
         if to_sell > 0:
             vol = min(to_sell, self.shares_remaining)
             self.shares_remaining -= vol
+            sell_extra = max(to_sell - base_to_sell, 0)
             logger.info(
-                "%s → SELL %d @%.2f (base=%d)",
-                now.strftime('%H:%M:%S'), vol, price, unsold_base
+                "%s → SELL %d @%.2f (base*mult= %d, extra=%d)",
+                now.strftime('%H:%M:%S'), vol, price, base_to_sell, sell_extra
             )
             return ['sell', vol]
         return ['hold', 0]
 
 if __name__ == '__main__':
+    strat = MultiHorizonReturnSell()
+    while strat.shares_remaining > 0:
+        strat.sell_strategy()
+        time.sleep(strat.request_interval)
     strat = MultiHorizonReturnSell()
     while strat.shares_remaining > 0:
         strat.sell_strategy()
