@@ -17,14 +17,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 超参数
-def main():
-    request_interval = 2  # 秒
-    # 多时点预测步数（2s、6s、10s）
-    horizons = {"2s": 1, "6s": 3, "10s": 5}
-    # 特征窗口长度（秒）
-    feat_windows = {"10s": 10, "20s": 20, "30s": 30}
-    window_counts = {k: int(v / request_interval) for k, v in feat_windows.items()}
+request_interval = 2  # 秒
+# 多时点预测步数（2s、6s、10s）
+horizons = {"2s": 1, "6s": 3, "10s": 5}
+# 特征窗口长度（秒）
+feat_windows = {"10s": 10, "20s": 20, "30s": 30}
+window_counts = {k: int(v / request_interval) for k, v in feat_windows.items()}
 
+def main():
     # 1. 数据加载
     logger.info("加载历史数据并预处理")
     df = pd.read_csv("hsi_history.csv", parse_dates=["dateTime"], dtype={"status": str})
@@ -33,7 +33,7 @@ def main():
     df["change"] = df["change"].astype(float)
     df["percent"] = df["percent"].astype(float)
 
-    # 2. 构造滚动与滞后特征
+    # 2. 构造特征
     logger.info("构造窗口特征: %s 样本点", window_counts)
     for name, cnt in window_counts.items():
         df[f"mean_{name}"] = df["price"].rolling(cnt).mean()
@@ -87,7 +87,7 @@ if __name__ == '__main__':
     main()
 
 
-# strategy_multi_return.py (含延迟补偿)
+# strategy_multi_return.py (增强窗口高位卖出逻辑)
 import logging
 import datetime
 import time
@@ -112,12 +112,12 @@ class MultiHorizonReturnSell:
         model_path="multi_horizon_return_model.pkl",
         buffer_minutes=1
     ):
-        # 参数
+        # 基础参数
         self.total_shares = total_shares
         self.shares_remaining = total_shares
         self.batch_count = batch_count
         self.request_interval = request_interval
-        # 时间
+        # 时间参数
         self.trading_duration = datetime.timedelta(minutes=10)
         self.clear_buffer = datetime.timedelta(minutes=buffer_minutes)
         self.effective_duration = self.trading_duration - self.clear_buffer
@@ -126,9 +126,9 @@ class MultiHorizonReturnSell:
         self.start_dt = None; self.last_dt = None
         self.segment_start = None; self.segment_end = None
         self.segment_max = -np.inf; self.segment_min = np.inf
-        # 窗口
+        # 窗口用于特征与高点判断
         self.price_window = deque(maxlen=window_size)
-        # 加载模型
+        # 加载模型（仍可保留模型辅助）
         with open(model_path, 'rb') as f:
             self.model = pickle.load(f)
         logger.info("加载模型 %s", model_path)
@@ -156,7 +156,7 @@ class MultiHorizonReturnSell:
         info = self.get_index_status()
         now = datetime.datetime.strptime(info['dateTime'], '%Y%m%d%H%M%S%f')
         price = float(info['current'])
-        # 去重 & 状态
+        # 去重 & 非交易
         if (self.last_dt and now <= self.last_dt) or info['status']!='T':
             return ['hold', 0]
         self.last_dt = now
@@ -168,43 +168,31 @@ class MultiHorizonReturnSell:
             self.segment_max = price; self.segment_min = price
         elapsed = now - self.start_dt
         sold = self.total_shares - self.shares_remaining
-        # 更新段极值
+        # 更新段内极值
         self.segment_max = max(self.segment_max, price)
         self.segment_min = min(self.segment_min, price)
-        # 基线量
+        # 计算基线卖出量
         t_sec = min(elapsed, self.effective_duration).total_seconds()
         base_cum = int(self.total_shares * t_sec / self.effective_duration.total_seconds())
         unsold_base = max(base_cum - sold, 0)
-        # 特征 & 预测（含延迟补偿）
-        feat = self.make_features(info)
-        sell_due_to_model = False
-        if feat is not None:
-            # 测量预测延迟
-            start_t = time.time()
-            preds = self.model.predict(feat)[0]  # ret_2s,ret_6s,ret_10s
-            latency = time.time() - start_t
-            # 延迟补偿：线性放大预测回报
-            horizons = np.array([1,3,5]) * self.request_interval
-            adjusted = preds * ((horizons + latency) / horizons)
-            # 峰值判断
-            if adjusted[0] >= adjusted[1] or adjusted[1] >= adjusted[2]:
-                sell_due_to_model = True
-        # 决策
         to_sell = 0
-        # 模型触发补阶段目标
-        if sell_due_to_model:
-            phase_idx = min(int(elapsed/self.batch_duration), self.batch_count-1)
-            phase_tgt = int(self.total_shares*(phase_idx+1)/self.batch_count)
-            unsold_phase = max(phase_tgt - sold, 0)
-            to_sell = max(to_sell, unsold_phase)
-        # 分段高点基线触发加码
-        if now <= self.segment_end:
-            if unsold_base > 0 and price >= self.segment_max:
-                strength = (price - self.segment_min) / (self.segment_max - self.segment_min + 1e-9)
+        # 窗口高位加码卖出
+        win_arr = np.array(self.price_window)
+        if unsold_base > 0:
+            # 取窗口80%位作为高点阈值
+            thresh = np.percentile(win_arr, 80)
+            if price >= thresh:
+                # 强度映射 [thresh, max] -> [0,1]
+                strength = (price - thresh) / (self.segment_max - thresh + 1e-9)
                 extra = int(strength * unsold_base)
                 to_sell = max(to_sell, unsold_base + extra)
-        else:
+            # 普通高点：在段内最高点时卖基线
+            elif price >= self.segment_max:
+                to_sell = max(to_sell, unsold_base)
+        # 段尾补基线卖出
+        if now > self.segment_end:
             to_sell = max(to_sell, unsold_base)
+            # 进入下一段
             self.segment_start = self.segment_end
             self.segment_end = self.segment_start + self.batch_duration
             self.segment_max = price; self.segment_min = price
@@ -215,9 +203,10 @@ class MultiHorizonReturnSell:
         if to_sell > 0:
             vol = min(to_sell, self.shares_remaining)
             self.shares_remaining -= vol
+            sell_extra = max(to_sell - unsold_base, 0)
             logger.info(
-                "%s → SELL %d @%.2f (base=%d, extra=%d, latency=%.3fs)",
-                now.strftime('%H:%M:%S'), vol, price, unsold_base, max(to_sell-unsold_base,0), latency if feat is not None else 0
+                "%s → SELL %d @%.2f (base=%d, extra=%d)",
+                now.strftime('%H:%M:%S'), vol, price, unsold_base, sell_extra
             )
             return ['sell', vol]
         return ['hold', 0]
