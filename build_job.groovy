@@ -1,133 +1,88 @@
-pipeline {
-  agent any
+def triggerAndStreamRemoteJob(Map config) {
+  String remoteJenkinsName = config.remoteJenkinsName
+  String remoteCredentialId = config.remoteCredentialId
+  String remoteJobName = config.remoteJobName
+  String displayName = config.displayName ?: remoteJobName
 
-  options {
-    timestamps()
-  }
+  Map<String, Object> remoteParameters = config.remoteParameters ?: [:]
 
-  stages {
-    stage('Trigger remote Jenkins job and stream console log') {
-      steps {
-        script {
-          /*
-           * Update these values for your environment.
-           */
-          String remoteJenkinsName = 'remoteJenkins'
-          String remoteJobName = 'A'
-          String remoteCredentialId = 'remote-jenkins-api-token'
+  int logPollSeconds = (config.logPollSeconds ?: 2) as int
+  int statusPollSeconds = (config.statusPollSeconds ?: 5) as int
 
-          /*
-           * Map parameters are recommended by the Parameterized Remote Trigger Plugin.
-           * Remove this map or leave it empty if the remote job does not need parameters.
-           */
-          Map<String, Object> remoteParameters = [
-            ENV: 'dev',
-            FOO: 'bar'
-          ]
+  String remoteLogSourceEncoding = config.remoteLogSourceEncoding ?: 'UTF-8'
 
-          /*
-           * Log polling interval in seconds.
-           * Do not set this too low, otherwise it may create unnecessary load on the remote Jenkins.
-           */
-          int logPollSeconds = 2
+  boolean abortTriggeredJob = config.containsKey('abortTriggeredJob')
+    ? config.abortTriggeredJob as boolean
+    : true
 
-          def remoteBuildHandle = null
-          String remoteBuildUrl = null
+  boolean allowUnstable = config.containsKey('allowUnstable')
+    ? config.allowUnstable as boolean
+    : false
 
-          withCredentials([
-            usernamePassword(
-              credentialsId: remoteCredentialId,
-              usernameVariable: 'REMOTE_JENKINS_USER',
-              passwordVariable: 'REMOTE_JENKINS_TOKEN'
-            )
-          ]) {
-            /*
-             * Trigger the remote Jenkins job.
-             *
-             * blockBuildUntilComplete: false
-             *   The step returns after the remote job is triggered.
-             *
-             * enhancedLogging: false
-             *   The plugin will not copy the remote console log.
-             *   This pipeline streams the log manually with curl.
-             *
-             * shouldNotFailBuild: true
-             *   The trigger step itself will not fail this pipeline if the remote job fails.
-             *   The final result is checked explicitly at the end.
-             */
-            remoteBuildHandle = triggerRemoteJob(
-              remoteJenkinsName: remoteJenkinsName,
-              job: remoteJobName,
-              parameters: remoteParameters,
-              auth: [
-                $class: 'CredentialsAuth',
-                credentials: remoteCredentialId
-              ],
+  def remoteBuildHandle = null
+  String remoteBuildUrl = null
 
-              blockBuildUntilComplete: false,
-              enhancedLogging: false,
-              shouldNotFailBuild: true,
+  withCredentials([
+    usernamePassword(
+      credentialsId: remoteCredentialId,
+      usernameVariable: 'REMOTE_JENKINS_USER',
+      passwordVariable: 'REMOTE_JENKINS_TOKEN'
+    )
+  ]) {
+    Map triggerArgs = [
+      remoteJenkinsName: remoteJenkinsName,
+      job: remoteJobName,
+      auth: [
+        $class: 'CredentialsAuth',
+        credentials: remoteCredentialId
+      ],
+      blockBuildUntilComplete: false,
+      enhancedLogging: false,
+      shouldNotFailBuild: true,
+      abortTriggeredJob: abortTriggeredJob,
+      pollInterval: statusPollSeconds
+    ]
 
-              /*
-               * If this pipeline is aborted, the triggered remote job will also be aborted.
-               * Change this to false if you want the remote job to continue running.
-               */
-              abortTriggeredJob: true,
+    if (remoteParameters != null && !remoteParameters.isEmpty()) {
+      triggerArgs.parameters = remoteParameters
+    }
 
-              /*
-               * This is the plugin polling interval for remote build status.
-               */
-              pollInterval: 5
-            )
+    remoteBuildHandle = triggerRemoteJob(triggerArgs)
 
-            echo "Remote job has been triggered."
-            echo "Initial remote build status: ${remoteBuildHandle.getBuildStatus()}"
+    echo "${displayName} has been triggered."
+    echo "${displayName} initial remote status: ${remoteBuildHandle.getBuildStatus()}"
 
-            /*
-             * Wait until the remote build leaves the queue and gets a concrete build URL.
-             */
-            timeout(time: 30, unit: 'MINUTES') {
-              waitUntil {
-                try {
-                  remoteBuildHandle.updateBuildStatus()
-                } catch (Throwable e) {
-                  echo "Waiting for remote build URL. Status update warning: ${e.getMessage()}"
-                }
+    timeout(time: 30, unit: 'MINUTES') {
+      waitUntil {
+        try {
+          remoteBuildHandle.updateBuildStatus()
+        } catch (Exception e) {
+          echo "Waiting for ${displayName} build URL. Status update warning: ${e.getMessage()}"
+        }
 
-                remoteBuildUrl = remoteBuildHandle.getBuildUrl()?.toString()
+        remoteBuildUrl = remoteBuildHandle.getBuildUrl()?.toString()
 
-                if (remoteBuildUrl?.trim()) {
-                  return true
-                }
+        if (remoteBuildUrl?.trim()) {
+          return true
+        }
 
-                echo "Remote build has not started yet. Current status: ${remoteBuildHandle.getBuildStatus()}"
-                sleep time: 2, unit: 'SECONDS'
-                return false
-              }
-            }
+        echo "${displayName} has not started yet. Current status: ${remoteBuildHandle.getBuildStatus()}"
+        sleep time: 2, unit: 'SECONDS'
+        return false
+      }
+    }
 
-            remoteBuildUrl = remoteBuildUrl.trim()
-            echo "Remote build URL: ${remoteBuildUrl}"
+    remoteBuildUrl = remoteBuildUrl.trim()
+    echo "${displayName} build URL: ${remoteBuildUrl}"
 
-            /*
-             * Stream the remote Jenkins console log into this pipeline console.
-             *
-             * This uses:
-             *
-             *   /logText/progressiveText?start=<offset>
-             *
-             * Jenkins returns:
-             *
-             *   X-Text-Size: <next offset>
-             *   X-More-Data: true
-             *
-             * The loop keeps reading from the next offset until X-More-Data is no longer true.
-             */
-            withEnv([
-              "REMOTE_BUILD_URL=${remoteBuildUrl}",
-              "LOG_POLL_SECONDS=${logPollSeconds}"
-            ]) {
-              sh label: 'Stream remote Jenkins console log', script: '''#!/usr/bin/env bash
+    withEnv([
+      "REMOTE_BUILD_URL=${remoteBuildUrl}",
+      "LOG_POLL_SECONDS=${logPollSeconds}",
+      "REMOTE_LOG_SOURCE_ENCODING=${remoteLogSourceEncoding}",
+      "LANG=C.UTF-8",
+      "LC_ALL=C.UTF-8"
+    ]) {
+      sh label: "Stream ${displayName} console log", encoding: 'UTF-8', script: '''#!/usr/bin/env bash
 set -euo pipefail
 set +x
 
@@ -137,18 +92,41 @@ set +x
 
 offset=0
 poll_seconds="${LOG_POLL_SECONDS:-2}"
+source_encoding="${REMOTE_LOG_SOURCE_ENCODING:-UTF-8}"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 headers="${tmp_dir}/headers"
 body="${tmp_dir}/body"
+converted_body="${tmp_dir}/body.utf8"
+
+print_log_body() {
+  if [ ! -s "$body" ]; then
+    return 0
+  fi
+
+  if [ "$source_encoding" = "UTF-8" ] || [ "$source_encoding" = "utf-8" ]; then
+    cat "$body"
+    return 0
+  fi
+
+  if command -v iconv >/dev/null 2>&1; then
+    if iconv -f "$source_encoding" -t UTF-8 "$body" > "$converted_body" 2>/dev/null; then
+      cat "$converted_body"
+      return 0
+    fi
+  fi
+
+  cat "$body"
+}
 
 echo "========== Remote Jenkins console log start =========="
 
 while true; do
   : > "$headers"
   : > "$body"
+  : > "$converted_body"
 
   http_code="$(
     curl -sS -L \
@@ -178,9 +156,7 @@ while true; do
       ;;
   esac
 
-  if [ -s "$body" ]; then
-    cat "$body"
-  fi
+  print_log_body
 
   next_offset="$(
     tr -d '\\r' < "$headers" \
@@ -217,58 +193,138 @@ done
 echo
 echo "========== Remote Jenkins console log end =========="
 '''
-            }
+    }
 
-            /*
-             * Do not use curl to query /api/xml or /api/json for the final result.
-             * The previous failure happened because that final curl request returned HTTP 403.
-             *
-             * Use the triggerRemoteJob handle instead.
-             */
-            String remoteBuildStatus = null
-            String remoteBuildResult = null
+    String remoteBuildStatus = null
+    String remoteBuildResult = null
 
-            timeout(time: 5, unit: 'MINUTES') {
-              waitUntil {
-                try {
-                  remoteBuildHandle.updateBuildStatus()
-                } catch (Throwable e) {
-                  echo "Final remote status update warning: ${e.getMessage()}"
-                }
+    timeout(time: 5, unit: 'MINUTES') {
+      waitUntil {
+        try {
+          remoteBuildHandle.updateBuildStatus()
+        } catch (Exception e) {
+          echo "Final ${displayName} status update warning: ${e.getMessage()}"
+        }
 
-                remoteBuildStatus = remoteBuildHandle.getBuildStatus()?.toString()
-                remoteBuildResult = remoteBuildHandle.getBuildResult()?.toString()
+        remoteBuildStatus = remoteBuildHandle.getBuildStatus()?.toString()
+        remoteBuildResult = remoteBuildHandle.getBuildResult()?.toString()
 
-                echo "Remote build status: ${remoteBuildStatus}, result: ${remoteBuildResult}"
+        echo "${displayName} remote status: ${remoteBuildStatus}, result: ${remoteBuildResult}"
 
-                if (remoteBuildResult?.trim()) {
-                  return true
-                }
+        if (remoteBuildResult?.trim()) {
+          return true
+        }
 
-                sleep time: 2, unit: 'SECONDS'
-                return false
-              }
-            }
+        sleep time: 2, unit: 'SECONDS'
+        return false
+      }
+    }
 
-            switch (remoteBuildResult) {
-              case 'SUCCESS':
-                echo "Remote build finished successfully."
-                break
+    switch (remoteBuildResult) {
+      case 'SUCCESS':
+        echo "${displayName} finished successfully."
+        break
 
-              case 'UNSTABLE':
-                echo "Remote build finished with UNSTABLE. Marking this pipeline as UNSTABLE."
-                currentBuild.result = 'UNSTABLE'
-                break
+      case 'UNSTABLE':
+        if (allowUnstable) {
+          echo "${displayName} finished with UNSTABLE. Marking this pipeline as UNSTABLE."
+          currentBuild.result = 'UNSTABLE'
+          break
+        }
+        error "${displayName} finished with UNSTABLE."
 
-              case 'FAILURE':
-              case 'ABORTED':
-              case 'NOT_BUILT':
-                error "Remote build finished with result: ${remoteBuildResult}"
+      case 'FAILURE':
+      case 'ABORTED':
+      case 'NOT_BUILT':
+        error "${displayName} finished with result: ${remoteBuildResult}"
 
-              default:
-                error "Remote build finished with an unknown result. Status: ${remoteBuildStatus}, result: ${remoteBuildResult}"
-            }
-          }
+      default:
+        error "${displayName} finished with an unknown result. Status: ${remoteBuildStatus}, result: ${remoteBuildResult}"
+    }
+
+    return [
+      jobName: remoteJobName,
+      buildUrl: remoteBuildUrl,
+      status: remoteBuildStatus,
+      result: remoteBuildResult
+    ]
+  }
+}
+
+def buildRun = null
+def deployRun = null
+
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+  }
+
+  stages {
+    stage('Step 1 - Trigger Build Pipeline') {
+      steps {
+        script {
+          String remoteJenkinsName = 'remoteJenkins'
+          String remoteCredentialId = 'remote-jenkins-api-token'
+
+          /*
+           * Minimal encoding fix:
+           * Use UTF-8 by default.
+           * If the remote Jenkins job log is produced by a Windows GBK/GB18030 environment,
+           * change this value to 'GB18030'.
+           */
+          String remoteLogSourceEncoding = 'UTF-8'
+
+          buildRun = triggerAndStreamRemoteJob(
+            remoteJenkinsName: remoteJenkinsName,
+            remoteCredentialId: remoteCredentialId,
+            remoteJobName: 'folder/build-pipeline',
+            displayName: 'Remote Build Pipeline',
+            remoteLogSourceEncoding: remoteLogSourceEncoding,
+            logPollSeconds: 2,
+            statusPollSeconds: 5,
+            allowUnstable: false,
+            abortTriggeredJob: true,
+            remoteParameters: [
+              ENV: 'dev',
+              BRANCH: 'main'
+            ]
+          )
+
+          echo "Remote build pipeline URL: ${buildRun.buildUrl}"
+        }
+      }
+    }
+
+    stage('Step 2 - Trigger Deploy Pipeline') {
+      steps {
+        script {
+          String remoteJenkinsName = 'remoteJenkins'
+          String remoteCredentialId = 'remote-jenkins-api-token'
+
+          /*
+           * Keep this value the same as the build stage unless the deploy job uses a different log encoding.
+           */
+          String remoteLogSourceEncoding = 'UTF-8'
+
+          deployRun = triggerAndStreamRemoteJob(
+            remoteJenkinsName: remoteJenkinsName,
+            remoteCredentialId: remoteCredentialId,
+            remoteJobName: 'folder/deploy-pipeline',
+            displayName: 'Remote Deploy Pipeline',
+            remoteLogSourceEncoding: remoteLogSourceEncoding,
+            logPollSeconds: 2,
+            statusPollSeconds: 5,
+            allowUnstable: false,
+            abortTriggeredJob: true,
+            remoteParameters: [
+              ENV: 'dev',
+              BUILD_PIPELINE_URL: buildRun.buildUrl
+            ]
+          )
+
+          echo "Remote deploy pipeline URL: ${deployRun.buildUrl}"
         }
       }
     }
