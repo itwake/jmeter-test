@@ -1,0 +1,172 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1648" height="928" viewBox="0 0 1648 928" role="img" aria-labelledby="diagram-title diagram-description">
+  <title id="diagram-title">LogAn — Simple Architecture</title>
+  <desc id="diagram-description">Cases and logs flow through the web app into the API and analysis engine, which produces investigation views. Storage supports the engine. Optional AI is connected to the engine by a dashed arrow. Evidence-based, human-reviewed. All visible artwork is vector; all labels remain editable text.</desc>
+  <defs>
+    <linearGradient id="blueCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F6FBFF"/>
+      <stop offset="1" stop-color="#EAF6FF"/>
+    </linearGradient>
+    <linearGradient id="tealCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F5FDFD"/>
+      <stop offset="1" stop-color="#EAFBFA"/>
+    </linearGradient>
+    <linearGradient id="blueChip" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#D7EEFF"/>
+      <stop offset="1" stop-color="#D1EAFB"/>
+    </linearGradient>
+    <linearGradient id="tealChip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#D2F3F3"/>
+      <stop offset="1" stop-color="#C4EEEE"/>
+    </linearGradient>
+    <linearGradient id="blueIcon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#417AA7"/>
+      <stop offset="1" stop-color="#205B8C"/>
+    </linearGradient>
+    <linearGradient id="brightIcon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#35A8F2"/>
+      <stop offset="1" stop-color="#1684D6"/>
+    </linearGradient>
+    <linearGradient id="screenTile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F9FDFF"/>
+      <stop offset="1" stop-color="#E0F3FF"/>
+    </linearGradient>
+  </defs>
+  <rect id="background" width="1648" height="928" fill="#FFFFFF"/>
+  <g id="title" font-family="Arial, Helvetica, sans-serif" font-weight="700">
+    <text x="381" y="180" fill="#07539B" font-size="72">LogAn</text>
+    <text x="609" y="180" fill="#1C2A3B" font-size="60" xml:space="preserve"> — Simple Architecture</text>
+  </g>
+
+<g id="cases-and-logs-panel">
+<rect x="43" y="292" width="216" height="237" rx="21" fill="#F0F8FD"/>
+<rect x="42" y="284" width="216" height="237" rx="17" fill="url(#blueCard)" stroke="#99CFF5" stroke-width="2.5"/>
+</g>
+<g id="web-app-panel">
+<rect x="323" y="292" width="228" height="237" rx="21" fill="#F0F8FD"/>
+<rect x="322" y="284" width="228" height="237" rx="17" fill="url(#blueCard)" stroke="#99CFF5" stroke-width="2.5"/>
+</g>
+<g id="analysis-engine-panel">
+<rect x="618" y="284" width="495" height="267" rx="21" fill="#F0F8FD"/>
+<rect x="617" y="276" width="495" height="267" rx="20" fill="url(#blueCard)" stroke="#2D96E9" stroke-width="2.7"/>
+</g>
+<g id="investigation-views-panel">
+<rect x="1186" y="280" width="423" height="282" rx="21" fill="#F2F9FB"/>
+<rect x="1185" y="272" width="423" height="282" rx="20" fill="url(#tealCard)" stroke="#47C3C7" stroke-width="2.7"/>
+</g>
+<g id="storage-panel">
+<rect x="593" y="634" width="262" height="205" rx="21" fill="#F0F8FD"/>
+<rect x="592" y="626" width="262" height="205" rx="17" fill="url(#blueCard)" stroke="#99CFF5" stroke-width="2.5"/>
+</g>
+<g id="optional-ai-panel">
+<rect x="898" y="634" width="258" height="205" rx="21" fill="#F2F9FB"/>
+<rect x="897" y="626" width="258" height="205" rx="17" fill="url(#tealCard)" stroke="#99DDE1" stroke-width="2.5"/>
+</g>
+<g id="flow-connectors">
+<line x1="258" y1="400" x2="305" y2="400" stroke="#167BCD" stroke-width="4"/>
+<path d="M 302 389 L 322 400 L 302 411 Z" fill="#167BCD"/>
+<line x1="550" y1="400" x2="600" y2="400" stroke="#167BCD" stroke-width="4"/>
+<path d="M 597 389 L 617 400 L 597 411 Z" fill="#167BCD"/>
+<line x1="1112" y1="400" x2="1168" y2="400" stroke="#167BCD" stroke-width="4"/>
+<path d="M 1165 389 L 1185 400 L 1165 411 Z" fill="#167BCD"/>
+<line x1="728" y1="626" x2="728" y2="562" stroke="#167BCD" stroke-width="4"/>
+<path d="M 717 565 L 728 545 L 739 565 Z" fill="#167BCD"/>
+<line x1="1008" y1="626" x2="1008" y2="562" stroke="#23A5AC" stroke-width="3.6" stroke-dasharray="8 6"/>
+<path d="M 998 565 L 1008 545 L 1018 565 Z" fill="#23A5AC"/>
+</g>
+<g id="cases-and-logs-icon" stroke-linecap="round" stroke-linejoin="round">
+<path d="M 106 324 H 146 L 166 345 V 409 Q 166 420 155 420 H 106 Q 95 420 95 409 V 335 Q 95 324 106 324 Z" fill="#FFFFFF" stroke="#0F70BC" stroke-width="4"/>
+<path d="M 146 325 V 344 H 165" fill="#D0E9FB" stroke="#0F70BC" stroke-width="3.7"/>
+<line x1="112" y1="358" x2="140" y2="358" stroke="#0F70BC" stroke-width="4.8"/>
+<line x1="112" y1="374" x2="134" y2="374" stroke="#0F70BC" stroke-width="4.8"/>
+<line x1="112" y1="389" x2="134" y2="389" stroke="#0F70BC" stroke-width="4.8"/>
+<path d="M 152 355 H 189 L 205 370 V 429 Q 205 440 194 440 H 151 Q 139 440 139 429 V 367 Q 139 355 152 355 Z" fill="url(#blueIcon)" stroke="#FFFFFF" stroke-width="2.8"/>
+<line x1="154" y1="382" x2="191" y2="382" stroke="#FFFFFF" stroke-width="4.4"/>
+<line x1="154" y1="394" x2="191" y2="394" stroke="#FFFFFF" stroke-width="4.4"/>
+<line x1="154" y1="407" x2="191" y2="407" stroke="#FFFFFF" stroke-width="4.4"/>
+<line x1="154" y1="420" x2="175" y2="420" stroke="#FFFFFF" stroke-width="4.4"/>
+</g>
+<text x="150" y="484" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700" fill="#162B43">Cases &amp; Logs</text>
+<g id="web-app-icon">
+<rect x="364" y="325" width="145" height="104" rx="8" fill="#FFFFFF" stroke="#B9DEF9" stroke-width="2.5"/>
+<path d="M 373 325 H 500 Q 509 325 509 334 V 348 H 364 V 334 Q 364 325 373 325 Z" fill="url(#brightIcon)"/>
+<circle cx="377" cy="336" r="3.5" fill="#D1EBFF"/>
+<circle cx="390" cy="336" r="3.5" fill="#D1EBFF"/>
+<circle cx="403" cy="336" r="3.5" fill="#D1EBFF"/>
+<rect x="379" y="360" width="42" height="54" rx="4" fill="#87C5F5"/>
+<rect x="432" y="360" width="62" height="24" rx="4" fill="#C4E4FC"/>
+<rect x="432" y="391" width="62" height="23" rx="4" fill="#AED8F7"/>
+</g>
+<text x="436" y="482" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="32" font-weight="700" fill="#162B43">Web App</text>
+<g id="analysis-engine-icon">
+<path d="M 846.00 310.00 L 849.18 310.13 L 854.16 301.71 L 866.31 305.61 L 865.46 315.36 L 870.43 318.89 L 870.43 318.89 L 872.78 321.04 L 882.00 317.79 L 888.80 328.58 L 881.89 335.50 L 883.42 341.40 L 883.42 341.40 L 883.84 344.56 L 893.00 348.00 L 891.27 360.64 L 881.52 361.49 L 878.91 367.00 L 878.91 367.00 L 877.20 369.69 L 882.00 378.21 L 872.55 386.78 L 864.54 381.17 L 859.00 383.71 L 859.00 383.71 L 855.96 384.67 L 854.16 394.29 L 841.41 394.78 L 838.88 385.33 L 833.00 383.71 L 833.00 383.71 L 830.06 382.50 L 822.50 388.70 L 812.42 380.88 L 816.55 372.02 L 813.09 367.00 L 813.09 367.00 L 811.62 364.18 L 801.83 364.07 L 799.14 351.61 L 808.00 347.47 L 808.58 341.40 L 808.58 341.40 L 809.26 338.29 L 801.83 331.93 L 807.78 320.64 L 817.23 323.17 L 821.57 318.89 L 821.57 318.89 L 824.10 316.95 L 822.50 307.30 L 834.31 302.48 L 839.92 310.49 L 846.00 310.00 Z M 830 348 a 16 16 0 1 0 32 0 a 16 16 0 1 0 -32 0 Z" fill="url(#blueIcon)" fill-rule="evenodd"/>
+<path d="M 912.00 353.00 L 913.88 353.09 L 916.88 348.48 L 924.04 351.09 L 923.37 356.55 L 926.14 358.86 L 926.14 358.86 L 927.41 360.25 L 932.79 359.11 L 936.01 366.03 L 931.67 369.41 L 932.00 373.00 L 932.00 373.00 L 931.91 374.88 L 936.52 377.88 L 933.91 385.04 L 928.45 384.37 L 926.14 387.14 L 926.14 387.14 L 924.75 388.41 L 925.89 393.79 L 918.97 397.01 L 915.59 392.67 L 912.00 393.00 L 912.00 393.00 L 910.12 392.91 L 907.12 397.52 L 899.96 394.91 L 900.63 389.45 L 897.86 387.14 L 897.86 387.14 L 896.59 385.75 L 891.21 386.89 L 887.99 379.97 L 892.33 376.59 L 892.00 373.00 L 892.00 373.00 L 892.09 371.12 L 887.48 368.12 L 890.09 360.96 L 895.55 361.63 L 897.86 358.86 L 897.86 358.86 L 899.25 357.59 L 898.11 352.21 L 905.03 348.99 L 908.41 353.33 L 912.00 353.00 Z M 904 373 a 8 8 0 1 0 16 0 a 8 8 0 1 0 -16 0 Z" fill="url(#brightIcon)" fill-rule="evenodd"/>
+</g>
+<text x="864.5" y="442" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="33" font-weight="700" fill="#162B43">API &amp; Analysis Engine</text>
+<g id="analysis-engine-stages">
+<rect x="634" y="465" width="78" height="52" rx="13" fill="url(#blueChip)"/>
+<text x="673.0" y="497.12" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">Ingest</text>
+<rect x="719" y="465" width="77" height="52" rx="13" fill="url(#blueChip)"/>
+<text x="757.5" y="497.12" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">Parse</text>
+<rect x="803" y="465" width="100" height="52" rx="13" fill="url(#blueChip)"/>
+<text x="853.0" y="497.12" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">Template</text>
+<rect x="910" y="465" width="96" height="52" rx="13" fill="url(#blueChip)"/>
+<text x="958.0" y="497.12" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">Timeline</text>
+<rect x="1013" y="465" width="82" height="52" rx="13" fill="url(#blueChip)" stroke="#A7D6F6" stroke-width="1.3"/>
+<text x="1054.0" y="489.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">Causal</text>
+<text x="1054.0" y="509.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">Score</text>
+</g>
+<g id="investigation-views-icon" stroke-linecap="round" stroke-linejoin="round">
+<rect x="1268" y="298" width="260" height="114" rx="12" fill="url(#blueIcon)"/>
+<rect x="1274" y="304" width="248" height="101" rx="7" fill="#F4FBFF" stroke="#9AD5F3" stroke-width="1.3"/>
+<rect x="1282" y="317" width="76" height="76" rx="5" fill="url(#screenTile)" stroke="#C0E4FA" stroke-width="1.8"/>
+<rect x="1365" y="317" width="84" height="76" rx="5" fill="url(#screenTile)" stroke="#C0E4FA" stroke-width="1.8"/>
+<rect x="1456" y="317" width="60" height="76" rx="5" fill="url(#screenTile)" stroke="#C0E4FA" stroke-width="1.8"/>
+<line x1="1294" y1="360" x2="1346" y2="360" stroke="#469FDB" stroke-width="4"/>
+<circle cx="1294" cy="360" r="6.2" fill="#208ED7"/>
+<circle cx="1320" cy="360" r="6.2" fill="#208ED7"/>
+<circle cx="1346" cy="360" r="6.2" fill="#208ED7"/>
+<path d="M 1388 371 L 1408 335 L 1430 363" fill="none" stroke="#1F9EA9" stroke-width="3.5"/>
+<circle cx="1388" cy="371" r="8.3" fill="#7DD1D5" stroke="#168F9F" stroke-width="2.8"/>
+<circle cx="1408" cy="335" r="7.7" fill="#7DD1D5" stroke="#168F9F" stroke-width="2.8"/>
+<circle cx="1430" cy="363" r="7.3" fill="#7DD1D5" stroke="#168F9F" stroke-width="2.8"/>
+<line x1="1472" y1="338" x2="1501" y2="338" stroke="#83C2ED" stroke-width="5.2"/>
+<line x1="1472" y1="353" x2="1501" y2="353" stroke="#83C2ED" stroke-width="5.2"/>
+<line x1="1472" y1="368" x2="1487" y2="368" stroke="#83C2ED" stroke-width="5.2"/>
+<rect x="1383" y="412" width="30" height="12" rx="0" fill="#168BCB"/>
+<rect x="1359" y="423" width="79" height="7" rx="3.5" fill="#1E6D9F"/>
+</g>
+<text x="1396.5" y="467" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="32" font-weight="700" fill="#162B43">Investigation Views</text>
+<g id="investigation-view-labels">
+<rect x="1202" y="484" width="106" height="51" rx="13" fill="url(#tealChip)"/>
+<text x="1255.0" y="515.96" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="19" font-weight="400" fill="#162B43">Timeline</text>
+<rect x="1316" y="484" width="156" height="51" rx="13" fill="url(#tealChip)"/>
+<text x="1394.0" y="515.96" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="19" font-weight="400" fill="#162B43">Causal Graph</text>
+<rect x="1480" y="484" width="111" height="51" rx="13" fill="url(#tealChip)"/>
+<text x="1535.5" y="515.96" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="19" font-weight="400" fill="#162B43">Summary</text>
+</g>
+<text x="1396.5" y="588" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="23" font-weight="400" fill="#495B73" font-style="italic">Evidence-based, human-reviewed</text>
+<g id="storage-icon" stroke-linejoin="round">
+<path d="M 690 660 A 34 14 0 0 1 758 660 V 705 A 34 14 0 0 1 690 705 Z" fill="url(#blueIcon)"/>
+<ellipse cx="724" cy="660" rx="34" ry="14" fill="url(#blueIcon)" stroke="#FFFFFF" stroke-width="2.5"/>
+<path d="M 690 681 C 695 699 753 699 758 681" fill="none" stroke="#FFFFFF" stroke-width="2.5"/>
+<path d="M 690 659 V 706 M 758 659 V 706" fill="none" stroke="#FFFFFF" stroke-width="1.5"/>
+<circle cx="747" cy="683" r="3.2" fill="#3AB0EE"/>
+<circle cx="747" cy="705" r="3.2" fill="#3AB0EE"/>
+</g>
+<text x="723" y="754" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700" fill="#162B43">Storage</text>
+<rect x="608" y="770" width="106" height="43" rx="13" fill="url(#blueChip)"/>
+<text x="661.0" y="797.62" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">SQLite</text>
+<rect x="721" y="770" width="117" height="43" rx="13" fill="url(#blueChip)"/>
+<text x="779.5" y="797.62" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#162B43">Local Files</text>
+<g id="optional-ai-icon" transform="translate(985 646) scale(3.25)" stroke="#1596A2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+<path d="M 12 5 C 12 0.5 6 0.5 5.4 4.1 C 2.3 4 0.9 7.5 2.8 9.7 C 0.2 11.5 0.9 15.8 3.5 16.5 C 2.8 19.5 6.1 22 8.4 20.6 C 10.2 23 12 21.2 12 18.8 Z"/>
+<path d="M 12 5 C 12 0.5 6 0.5 5.4 4.1 C 2.3 4 0.9 7.5 2.8 9.7 C 0.2 11.5 0.9 15.8 3.5 16.5 C 2.8 19.5 6.1 22 8.4 20.6 C 10.2 23 12 21.2 12 18.8 Z" transform="translate(24 0) scale(-1 1)"/>
+<path d="M 5.4 4.1 L 6 6 M 2.8 9.7 L 5 10.3 M 12 10.5 H 7.5 M 3.5 16.5 L 5 14.7 M 18.6 4.1 L 18 6 M 21.2 9.7 L 19 10.3 M 12 10.5 H 14.9 M 20.5 16.5 L 19 14.7"/>
+</g>
+<text x="1026" y="754" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700" fill="#162B43">Optional AI</text>
+<rect x="911" y="770" width="111" height="43" rx="13" fill="url(#tealChip)"/>
+<text x="966.5" y="796.26" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#162B43">Template labels</text>
+<rect x="1029" y="770" width="111" height="43" rx="13" fill="url(#tealChip)"/>
+<text x="1084.5" y="796.26" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#162B43">Summary help</text>
+</svg>
