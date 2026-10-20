@@ -250,6 +250,52 @@ def probe_intent(
     )
 
 
+def probe_auto_v2(api_base: str, token: str, *, prompt: str, tier: str | None, api_version: str | None) -> dict | None:
+    """Auto v2, what current VS Code uses: ``POST /auto`` with the prompt and a tier.
+
+    From microsoft/vscode extensions/copilot (autoV2Fetcher.ts, autoModeTiers.ts):
+    body ``{prompt, tier?, has_image?, multi_turn?}``, tiers efficiency /
+    balance / intelligence / fast (balance is the picker default), response
+    ``{session_token, expires_at, selected_model: {id, ...model metadata},
+    discounted_costs?}``. The chat request then sends ``selected_model.id`` with
+    ``Copilot-Session-Token``. The server routes on the prompt text, unlike the
+    older /models/session pool.
+    """
+
+    body: dict = {"prompt": prompt}
+    if tier:
+        body["tier"] = tier
+    extra = {"X-GitHub-Api-Version": api_version} if api_version else {}
+    status, raw, elapsed = http("POST", f"{api_base}/auto", token=token, body=body, extra=extra)
+    print(f"[auto-v2] POST {api_base}/auto tier={tier or 'server default'} prompt={prompt[:40]!r} -> {status} ({elapsed:.1f}s)")
+    if status != 200:
+        print("[auto-v2] body:", redact(raw[:800]) or "<empty>")
+        return None
+    payload = json.loads(raw)
+    session_token = payload.get("session_token")
+    if isinstance(session_token, str):
+        _SECRETS.append(session_token)
+    selected = payload.get("selected_model") if isinstance(payload.get("selected_model"), dict) else {}
+    caps = selected.get("capabilities") if isinstance(selected.get("capabilities"), dict) else {}
+    limits = caps.get("limits") if isinstance(caps.get("limits"), dict) else {}
+    supports = caps.get("supports") if isinstance(caps.get("supports"), dict) else {}
+    expires_at = payload.get("expires_at")
+    lifetime = int(expires_at - time.time()) if isinstance(expires_at, (int, float)) else None
+    print(
+        f"[auto-v2] selected_model={selected.get('id')!r} name={selected.get('name')!r} vendor={selected.get('vendor')!r} "
+        f"limits={limits.get('max_context_window_tokens')}/{limits.get('max_prompt_tokens')}/{limits.get('max_output_tokens')} "
+        f"efforts={supports.get('reasoning_effort')!r} tools={supports.get('tool_calls')!r} "
+        f"discounts={json.dumps(payload.get('discounted_costs'), sort_keys=True)} session={'yes' if session_token else 'no'} expires_in={lifetime}s"
+    )
+    extra_keys = sorted(set(payload) - {"session_token", "expires_at", "selected_model", "discounted_costs"})
+    if extra_keys:
+        print(f"[auto-v2] other keys: {extra_keys}")
+    selected_keys = sorted(set(selected) - {"id", "name", "vendor", "version", "capabilities", "model_picker_enabled"})
+    if selected_keys:
+        print(f"[auto-v2] selected_model extra keys: {selected_keys}")
+    return payload
+
+
 def probe_chat(
     api_base: str,
     token: str,
@@ -351,6 +397,13 @@ def main() -> None:
         action="store_true",
         help="add the VScode-SessionId / VScode-MachineId / Editor-Device-Id headers VS Code's CAPI client sends (random ids)",
     )
+    parser.add_argument(
+        "--auto-v2",
+        action="store_true",
+        help="call POST /auto (Auto v2, what current VS Code uses) with --prompt for each of --tiers, then one chat with the selected model",
+    )
+    parser.add_argument("--prompt", default="hey", help="prompt text for --auto-v2 (default: hey)")
+    parser.add_argument("--tiers", default="balance,efficiency,intelligence,fast,", help="comma-separated tiers for --auto-v2; an empty item means no tier (server default)")
     parser.add_argument("--editor-version", default=None, help="override Editor-Version (e.g. vscode/1.117.2, your VS Code's real version)")
     parser.add_argument("--plugin-version", default=None, help="override Editor-Plugin-Version (e.g. copilot-chat/0.39.1, your Copilot Chat extension's version)")
     parser.add_argument("--user-agent", default=None, help="override User-Agent (e.g. GitHubCopilotChat/0.39.1)")
@@ -384,6 +437,28 @@ def main() -> None:
         print("[exchange] skipped: EFP_PROBE_TOKEN already looks like a Copilot token")
     api_base = (args.api_base or api_base or DEFAULT_API_BASE).rstrip("/")
     print(f"[api] base url: {api_base}")
+
+    if args.auto_v2:
+        tiers = [t.strip() for t in args.tiers.split(",")]
+        decisions: list[tuple[str | None, dict]] = []
+        for tier in tiers:
+            decision = probe_auto_v2(api_base, token, prompt=args.prompt, tier=tier or None, api_version=api_version)
+            if decision is not None:
+                decisions.append((tier or None, decision))
+        # A longer, clearly agentic prompt: does the routing change with the text?
+        long_prompt = (
+            "Refactor the payment service: split the 2,000-line PaymentProcessor into bounded modules, keep the public API, "
+            "add retries with idempotency keys for the gateway calls, migrate the integration tests, and explain the trade-offs."
+        )
+        probe_auto_v2(api_base, token, prompt=long_prompt, tier="balance", api_version=api_version)
+        if decisions:
+            tier, decision = decisions[0]
+            selected = decision.get("selected_model") or {}
+            model = str(selected.get("id") or "")
+            session_token = decision.get("session_token")
+            if model and isinstance(session_token, str):
+                probe_chat(api_base, token, session_token, model, label=f"auto-v2:{tier or 'default'}")
+        return
 
     session = probe_session(api_base, token, dump_json=args.json, api_version=api_version, hints=args.hint)
     if session is None and api_version:
