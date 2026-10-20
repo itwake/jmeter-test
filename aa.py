@@ -175,9 +175,44 @@ def probe_session(
     return payload
 
 
-def probe_models(api_base: str, token: str, *, detail_ids: tuple[str, ...] = ()) -> None:
-    status, raw, elapsed = http("GET", f"{api_base}/models", token=token)
-    print(f"[models] GET {api_base}/models -> {status} ({elapsed:.1f}s)")
+def _pricing_tiers(row: dict) -> str:
+    """``billing.token_prices`` as VS Code reads it: the default tier's prompt cap and the long-context tier.
+
+    VS Code offers two context sizes per model, the default tier's
+    ``max_prompt_tokens`` (GPT-6: 272k, the regular window GitHub bills at
+    the base rate) and the full ``capabilities.limits`` window (1M, billed at
+    the long-context tier above the threshold); nothing else is sent on the
+    wire, the client just uses more of the window.
+    """
+
+    billing = row.get("billing") if isinstance(row.get("billing"), dict) else {}
+    prices = billing.get("token_prices") if isinstance(billing.get("token_prices"), dict) else {}
+    if not prices:
+        return "none"
+    parts = []
+    for tier_name, tier in prices.items():
+        if not isinstance(tier, dict):
+            continue
+        parts.append(
+            f"{tier_name}(prompt_cap={tier.get('max_prompt_tokens')} in={tier.get('input_price')} out={tier.get('output_price')})"
+        )
+    return " ".join(parts) or json.dumps(prices, sort_keys=True)[:200]
+
+
+def probe_models(
+    api_base: str,
+    token: str,
+    *,
+    detail_ids: tuple[str, ...] = (),
+    api_version: str | None = None,
+) -> None:
+    # The API version header selects the schema: VS Code's CAPI client sends
+    # it on /models too, and the 2026-10-20 /auto answer (which needs it)
+    # described the GPT-6 line with OpenAI's 1M windows where the headerless
+    # /models call had reported 400k.
+    extra = {"X-GitHub-Api-Version": api_version} if api_version else {}
+    status, raw, elapsed = http("GET", f"{api_base}/models", token=token, extra=extra)
+    print(f"[models] GET {api_base}/models (api-version={api_version or 'none'}) -> {status} ({elapsed:.1f}s)")
     if status != 200:
         print("[models] body:", redact(raw[:600]) or "<empty>")
         return
@@ -209,8 +244,11 @@ def probe_models(api_base: str, token: str, *, detail_ids: tuple[str, ...] = ())
         print(
             f"[models] {model_id} | picker={row.get('model_picker_enabled')} | policy={policy.get('state')} | "
             f"{limits.get('max_context_window_tokens')}/{limits.get('max_prompt_tokens')}/{limits.get('max_output_tokens')} | "
-            f"tools={supports.get('tool_calls')} | vision={supports.get('vision')} | efforts={efforts}"
+            f"tools={supports.get('tool_calls')} | vision={supports.get('vision')} | efforts={efforts} | "
+            f"tiers={_pricing_tiers(row)}"
         )
+    long_context = [str(row.get("id")) for row in rows if isinstance(row, dict) and "long_context" in _pricing_tiers(row)]
+    print(f"[models] models with a long_context pricing tier: {long_context or 'none'}")
 
 
 def probe_intent(
@@ -250,7 +288,15 @@ def probe_intent(
     )
 
 
-def probe_auto_v2(api_base: str, token: str, *, prompt: str, tier: str | None, api_version: str | None) -> dict | None:
+def probe_auto_v2(
+    api_base: str,
+    token: str,
+    *,
+    prompt: str,
+    tier: str | None,
+    api_version: str | None,
+    dump_json: bool = False,
+) -> dict | None:
     """Auto v2, what current VS Code uses: ``POST /auto`` with the prompt and a tier.
 
     From microsoft/vscode extensions/copilot (autoV2Fetcher.ts, autoModeTiers.ts):
@@ -290,10 +336,72 @@ def probe_auto_v2(api_base: str, token: str, *, prompt: str, tier: str | None, a
     extra_keys = sorted(set(payload) - {"session_token", "expires_at", "selected_model", "discounted_costs"})
     if extra_keys:
         print(f"[auto-v2] other keys: {extra_keys}")
+    # Undeclared in VS Code's AutoV2Response type but present on this seat
+    # (2026-10-20 run): multi_turn / multi_turn_mode / hydra_scores. Their
+    # shape decides whether the runtimes can hand the state back per turn.
+    for key in ("multi_turn_mode", "multi_turn", "hydra_scores"):
+        if key in payload:
+            print(f"[auto-v2] {key}={redact(json.dumps(payload[key], sort_keys=True))[:600]}")
     selected_keys = sorted(set(selected) - {"id", "name", "vendor", "version", "capabilities", "model_picker_enabled"})
     if selected_keys:
         print(f"[auto-v2] selected_model extra keys: {selected_keys}")
+    print(
+        f"[auto-v2] selected_model endpoints={selected.get('supported_endpoints')!r} "
+        f"category={selected.get('model_picker_category')!r} price={selected.get('model_picker_price_category')!r} "
+        f"billing={json.dumps(selected.get('billing'), sort_keys=True)} preview={selected.get('preview')!r}"
+    )
+    if dump_json:
+        print(redact(json.dumps(payload, indent=2, sort_keys=True)))
     return payload
+
+
+def probe_context_test(api_base: str, token: str, *, model: str, k_tokens: int) -> None:
+    """Does ``/responses`` accept a prompt above the catalog's ``max_prompt_tokens``?
+
+    ``GET /models`` reports 272,000 prompt tokens for the GPT-6 line while
+    ``POST /auto`` embeds OpenAI's 872k / 922k. This sends about ``k_tokens``
+    thousand tokens of filler (``the quick brown fox jumps over the lazy dog.``
+    is ten o200k tokens) and reports the status, the error text or the usage.
+    It costs input tokens at the model's rate (GPT-6: about $2 per million,
+    more above the long-context threshold), so run it once with a number just
+    above the cap, e.g. ``--context-test 300``.
+    """
+
+    sentence = "the quick brown fox jumps over the lazy dog. "
+    filler = sentence * max(1, int(k_tokens) * 100)
+    body = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": filler + "\n\nReply with the single word pong."}],
+            }
+        ],
+        "stream": False,
+        "reasoning": {"effort": "low"},
+        "max_output_tokens": 32,
+    }
+    print(
+        f"[context-test] POST {api_base}/responses model={model} filler~{k_tokens}k tokens "
+        f"({len(filler):,} chars) ..."
+    )
+    status, raw, elapsed = http("POST", f"{api_base}/responses", token=token, body=body, timeout=600)
+    print(f"[context-test] -> {status} ({elapsed:.1f}s)")
+    if status != 200:
+        print("[context-test] body:", redact(raw[:800]) or "<empty>")
+        return
+    payload = json.loads(raw)
+    text = ""
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content") or []:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                text += part["text"]
+    print(
+        f"[context-test] response.model={payload.get('model')!r} text={text.strip()[:40]!r} "
+        f"usage={json.dumps(payload.get('usage'), sort_keys=True)}"
+    )
 
 
 def probe_chat(
@@ -402,6 +510,14 @@ def main() -> None:
         action="store_true",
         help="call POST /auto (Auto v2, what current VS Code uses) with --prompt for each of --tiers, then one chat with the selected model",
     )
+    parser.add_argument(
+        "--context-test",
+        type=int,
+        default=None,
+        metavar="K_TOKENS",
+        help="send about K thousand tokens of filler to /responses with --model (default gpt-6.1-sol) to learn whether the "
+        "gateway enforces the catalog's 272k prompt cap; costs input tokens, run once (e.g. 300)",
+    )
     parser.add_argument("--prompt", default="hey", help="prompt text for --auto-v2 (default: hey)")
     parser.add_argument("--tiers", default="balance,efficiency,intelligence,fast,", help="comma-separated tiers for --auto-v2; an empty item means no tier (server default)")
     parser.add_argument("--editor-version", default=None, help="override Editor-Version (e.g. vscode/1.117.2, your VS Code's real version)")
@@ -438,11 +554,17 @@ def main() -> None:
     api_base = (args.api_base or api_base or DEFAULT_API_BASE).rstrip("/")
     print(f"[api] base url: {api_base}")
 
+    if args.context_test:
+        probe_context_test(api_base, token, model=args.model or "gpt-6.1-sol", k_tokens=args.context_test)
+        return
+
     if args.auto_v2:
         tiers = [t.strip() for t in args.tiers.split(",")]
         decisions: list[tuple[str | None, dict]] = []
         for tier in tiers:
-            decision = probe_auto_v2(api_base, token, prompt=args.prompt, tier=tier or None, api_version=api_version)
+            decision = probe_auto_v2(
+                api_base, token, prompt=args.prompt, tier=tier or None, api_version=api_version, dump_json=args.json
+            )
             if decision is not None:
                 decisions.append((tier or None, decision))
         # A longer, clearly agentic prompt: does the routing change with the text?
@@ -489,7 +611,7 @@ def main() -> None:
             probe_session(api_base, token, dump_json=False, api_version=api_version, compact=True, body_override=body)
     if not args.no_models:
         detail = ("gpt-6.1-sol", "gpt-6-sol", "mai-code-1.1-flash") if args.models_detail else ()
-        probe_models(api_base, token, detail_ids=detail)
+        probe_models(api_base, token, detail_ids=detail, api_version=api_version)
 
     if args.intent and isinstance(session, dict) and isinstance(session.get("session_token"), str):
         pool_models = [str(m) for m in (session.get("available_models") or [])]
