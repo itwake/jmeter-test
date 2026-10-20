@@ -15,7 +15,9 @@ Run it yourself; the token never leaves your machine except to GitHub:
 
     Options: --model gpt-6.1-sol (pool model for --chat), --api-base https://... (override),
              --no-models (skip GET /models), --json (dump raw JSON of the session response,
-             token redacted)
+             token redacted), --hints / --hints-wide (model_hints sweeps), --intent (intent
+             router), --vscode-ids (VS Code's id headers), --editor-version / --plugin-version /
+             --user-agent (send your real VS Code and extension versions)
 
 Prints statuses, model ids, limits, expiry and error text only. Tokens are
 redacted from anything printed. Proxy settings come from HTTPS_PROXY/NO_PROXY
@@ -117,16 +119,31 @@ def probe_session(
     dump_json: bool,
     api_version: str | None,
     hints: list[str] | None = None,
+    compact: bool = False,
+    body_override: dict | None = None,
 ) -> dict | None:
     hints = [h for h in (hints or []) if h] or ["auto"]
-    body = {"auto_mode": {"model_hints": hints}}
+    body = body_override if body_override is not None else {"auto_mode": {"model_hints": hints}}
     # VS Code's CAPI client sends X-GitHub-Api-Version on every CAPI request
     # (2026-08-01 in @vscode/copilot-api 0.5.2); the runtimes did not, and a
     # route can 404 for an unknown or missing API version.
     extra = {"X-GitHub-Api-Version": api_version} if api_version else {}
     status, raw, elapsed = http("POST", f"{api_base}/models/session", token=token, body=body, extra=extra)
+    label = json.dumps(body) if body_override is not None else f"hints={hints}"
+    if compact:
+        if status != 200:
+            print(f"[sweep] {label} -> {status} {redact(raw[:160]).strip()!r}")
+            return None
+        payload = json.loads(raw)
+        if isinstance(payload.get("session_token"), str):
+            _SECRETS.append(payload["session_token"])
+        print(
+            f"[sweep] {label} -> pool={payload.get('available_models')!r} selected={payload.get('selected_model')!r} "
+            f"discounts={json.dumps(payload.get('discounted_costs'), sort_keys=True)}"
+        )
+        return payload
     print(
-        f"[session] POST {api_base}/models/session hints={hints} (X-GitHub-Api-Version={api_version or 'none'}) -> {status} ({elapsed:.1f}s)"
+        f"[session] POST {api_base}/models/session {label} (X-GitHub-Api-Version={api_version or 'none'}) -> {status} ({elapsed:.1f}s)"
     )
     if status != 200:
         print("[session] body:", redact(raw[:800]) or "<empty>")
@@ -324,8 +341,34 @@ def main() -> None:
         default=None,
         help="comma-separated available_models to hand the router instead of the session's pool (e.g. gpt-6.1-sol,gpt-6-sol,mai-code-1.1-flash)",
     )
+    parser.add_argument(
+        "--hints-wide",
+        action="store_true",
+        help="sweep ~40 model_hints candidates (picker categories, tiers, combos, empty) and print one line per pool",
+    )
+    parser.add_argument(
+        "--vscode-ids",
+        action="store_true",
+        help="add the VScode-SessionId / VScode-MachineId / Editor-Device-Id headers VS Code's CAPI client sends (random ids)",
+    )
+    parser.add_argument("--editor-version", default=None, help="override Editor-Version (e.g. vscode/1.117.2, your VS Code's real version)")
+    parser.add_argument("--plugin-version", default=None, help="override Editor-Plugin-Version (e.g. copilot-chat/0.39.1, your Copilot Chat extension's version)")
+    parser.add_argument("--user-agent", default=None, help="override User-Agent (e.g. GitHubCopilotChat/0.39.1)")
     args = parser.parse_args()
     api_version = (args.api_version or "").strip() or None
+    if args.editor_version:
+        PLUGIN_HEADERS["Editor-Version"] = args.editor_version
+    if args.plugin_version:
+        PLUGIN_HEADERS["Editor-Plugin-Version"] = args.plugin_version
+    if args.user_agent:
+        PLUGIN_HEADERS["User-Agent"] = args.user_agent
+    if args.vscode_ids:
+        import uuid
+
+        PLUGIN_HEADERS["VScode-SessionId"] = f"{uuid.uuid4()}{int(time.time() * 1000)}"
+        PLUGIN_HEADERS["VScode-MachineId"] = uuid.uuid4().hex + uuid.uuid4().hex
+        PLUGIN_HEADERS["Editor-Device-Id"] = str(uuid.uuid4())
+    print(f"[headers] {json.dumps({k: v for k, v in PLUGIN_HEADERS.items()}, sort_keys=True)}")
 
     raw_token = (os.environ.get("EFP_PROBE_TOKEN") or "").strip()
     if not raw_token:
@@ -352,6 +395,23 @@ def main() -> None:
         # the obvious things to try.
         for hint in ("efficiency", "balance", "balanced", "intelligence", "quality", "gpt-6.1-sol", "gpt-6-sol", "gpt"):
             probe_session(api_base, token, dump_json=False, api_version=api_version, hints=[hint])
+    if args.hints_wide:
+        # VS Code's hint is an experiment treatment variable we cannot see; try
+        # the /models picker categories, tier spellings, combos and the empty
+        # list, one compact line each.
+        candidates: list[list[str]] = [[h] for h in (
+            "auto", "lightweight", "versatile", "powerful", "standard", "premium", "default", "none",
+            "fast", "smart", "cheap", "reasoning", "coding", "chat", "agent", "editor", "panel", "inline",
+            "auto-v2", "auto_v2", "autov2", "auto2", "v2", "auto-balanced", "auto-efficiency", "auto-intelligence",
+            "auto:balance", "auto/balance", "tier-balance", "balance-tier", "gpt-6", "gpt6", "openai", "copilot",
+            "Auto", "AUTO", "auto-model", "automode", "auto_mode",
+        )]
+        candidates += [["auto", "balance"], ["balance", "auto"], ["auto", "gpt-6.1-sol"], ["gpt-6.1-sol", "auto"], ["auto", "powerful"], []]
+        for hint_list in candidates:
+            probe_session(api_base, token, dump_json=False, api_version=api_version, hints=hint_list, compact=True,
+                          body_override={"auto_mode": {"model_hints": hint_list}})
+        for body in ({"auto_mode": {}}, {}, {"auto_mode": {"model_hints": ["auto"], "tier": "balance"}}, {"auto_mode": {"model_hints": ["auto"], "location": "panel"}}):
+            probe_session(api_base, token, dump_json=False, api_version=api_version, compact=True, body_override=body)
     if not args.no_models:
         detail = ("gpt-6.1-sol", "gpt-6-sol", "mai-code-1.1-flash") if args.models_detail else ()
         probe_models(api_base, token, detail_ids=detail)
