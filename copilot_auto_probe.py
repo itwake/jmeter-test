@@ -532,12 +532,20 @@ def _find_key(value, key: str):
     return None
 
 
-def responses_stream(url: str, *, token: str, body: dict, extra: dict, timeout: float = 120.0):
-    """One streamed ``/responses`` call, the way the runtimes send it; returns the final response object.
+# Response headers printed next to a charge: the request ids a support ticket
+# needs and the quota / usage snapshots Copilot stamps on chat answers.
+BILLING_HEADER_MARKS = ("quota", "usage", "request-id", "ratelimit")
 
-    The charge (``usage.copilot_usage.total_nano_aiu``) rides on the stream's
-    last event, so the events are read to the end and the last one carrying a
-    ``response`` wins.
+
+def responses_stream(url: str, *, token: str, body: dict, extra: dict, timeout: float = 120.0):
+    """One streamed ``/responses`` call, the way the runtimes send it.
+
+    Returns ``(status, final event, raw error body, seconds, seen)``. The final
+    event is the last one carrying a ``response`` and is kept whole: Copilot
+    can put its charge (``copilot_usage.total_nano_aiu``) next to ``response``
+    instead of inside ``response.usage``. ``seen`` holds the event types in
+    order, the last ``copilot_usage`` found on any event with the event type
+    it came on, and the billing-related response headers.
     """
 
     headers = {"Authorization": f"Bearer {token}", **PLUGIN_HEADERS, "Content-Type": "application/json"}
@@ -546,9 +554,15 @@ def responses_stream(url: str, *, token: str, body: dict, extra: dict, timeout: 
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
     started = time.monotonic()
     final = None
+    seen: dict = {"event_types": [], "copilot_usage": None, "copilot_usage_event": None, "headers": {}}
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.status
+            seen["headers"] = {
+                name: value
+                for name, value in response.headers.items()
+                if any(mark in name.lower() for mark in BILLING_HEADER_MARKS)
+            }
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"):
@@ -560,14 +574,23 @@ def responses_stream(url: str, *, token: str, body: dict, extra: dict, timeout: 
                     event = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(event, dict) and isinstance(event.get("response"), dict):
-                    final = event["response"]
-            return status, final, "", time.monotonic() - started
+                if not isinstance(event, dict):
+                    continue
+                event_type = str(event.get("type") or "<untyped>")
+                if event_type not in seen["event_types"]:
+                    seen["event_types"].append(event_type)
+                copilot_usage = _find_key(event, "copilot_usage")
+                if copilot_usage is not None:
+                    seen["copilot_usage"] = copilot_usage
+                    seen["copilot_usage_event"] = event_type
+                if isinstance(event.get("response"), dict):
+                    final = event
+            return status, final, "", time.monotonic() - started, seen
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-        return exc.code, None, raw, time.monotonic() - started
+        return exc.code, None, raw, time.monotonic() - started, seen
     except urllib.error.URLError as exc:
-        return 0, None, f"URLError: {exc.reason}", time.monotonic() - started
+        return 0, None, f"URLError: {exc.reason}", time.monotonic() - started, seen
 
 
 def _default_tier_prices(*entries) -> dict | None:
@@ -620,8 +643,8 @@ def probe_discount_test(
 
     Routes once (``POST /auto``), then sends the same small ``/responses``
     request with the picked model under each header set of DISCOUNT_VARIANTS
-    and compares what Copilot says it charged (``usage.copilot_usage
-    .total_nano_aiu``, 1 credit = 10^9 nano-AIU) with the model's list price
+    and compares what Copilot says it charged (``copilot_usage.total_nano_aiu``
+    on the stream's last event, 1 credit = 10^9 nano-AIU) with the model's list price
     for the tokens used. ``baseline`` (no session token) is the plain model;
     a variant whose charge per list-price credit is ~10% below the baseline's
     is billed in the auto pool. Each request starts with a fresh nonce and
@@ -692,14 +715,32 @@ def probe_discount_test(
                 "reasoning": {"effort": "low"},
                 "max_output_tokens": 64,
             }
-            status, final, raw, elapsed = responses_stream(f"{api_base}/responses", token=token, body=body, extra=extra)
+            status, final_event, raw, elapsed, seen = responses_stream(
+                f"{api_base}/responses", token=token, body=body, extra=extra
+            )
             label = f"[discount:{name}#{attempt + 1}]"
-            if status != 200 or final is None:
+            if status != 200 or final_event is None:
                 print(f"{label} -> {status} ({elapsed:.1f}s) {redact(raw[:400]).strip() or '<no final event>'}")
                 continue
+            final = final_event["response"]
             usage = final.get("usage") if isinstance(final.get("usage"), dict) else {}
-            copilot_usage = _find_key(final, "copilot_usage")
+            copilot_usage = seen["copilot_usage"]
             nano = copilot_usage.get("total_nano_aiu") if isinstance(copilot_usage, dict) else None
+            if attempt == 0:
+                # Once per header set: where the charge sits in the stream (the
+                # runtimes read response.usage only) and what else Copilot says.
+                if copilot_usage is None:
+                    where = "absent"
+                elif "copilot_usage" in usage:
+                    where = "response.usage"
+                elif "copilot_usage" in final_event:
+                    where = f"top level of the {seen['copilot_usage_event']} event"
+                else:
+                    where = f"inside the {seen['copilot_usage_event']} event"
+                print(
+                    f"{label} copilot_usage: {where}; final event keys={sorted(final_event)} "
+                    f"events={seen['event_types']} headers={redact(json.dumps(seen['headers'], sort_keys=True))}"
+                )
             details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
             tokens = (
                 f"in={usage.get('input_tokens')} cached={details.get('cached_tokens', 0)} out={usage.get('output_tokens')}"
@@ -744,7 +785,12 @@ def probe_discount_test(
         else:
             verdict = "unclear"
         print(f"[discount]   {name:<13} {value:.4f} = {relative:.3f} x baseline -> {verdict}")
-    if not any(listed for rows in results.values() for _, listed in rows):
+    if not results:
+        print(
+            "[discount] Copilot returned no charge (copilot_usage.total_nano_aiu) on any request, so nothing can be "
+            "compared here; look for these requests in the usage report instead"
+        )
+    elif not any(listed for rows in results.values() for _, listed in rows):
         print("[discount] no list price found for the model, so only the raw charges above can be compared by hand")
 
 
