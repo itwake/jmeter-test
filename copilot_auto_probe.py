@@ -12,6 +12,9 @@ Run it yourself; the token never leaves your machine except to GitHub:
       python copilot_auto_probe.py                 # token exchange + /models/session + GET /models
       python copilot_auto_probe.py --chat          # + one tiny /responses call with the session token
       python copilot_auto_probe.py --chat --bad-model claude-sonnet-5   # + capture the non-pool error
+      python copilot_auto_probe.py --auto-v2 --prompt "..."             # which model /auto picks for a prompt
+      python copilot_auto_probe.py --discount-test                      # is the auto pick billed at the auto discount?
+      python copilot_auto_probe.py --discount-test --variants efp --repeat 20   # one header set, to find in the usage report
 
     Options: --model gpt-6.1-sol (pool model for --chat), --api-base https://... (override),
              --no-models (skip GET /models), --json (dump raw JSON of the session response,
@@ -367,8 +370,27 @@ def probe_context_test(api_base: str, token: str, *, model: str, k_tokens: int) 
     above the cap, e.g. ``--context-test 300``.
     """
 
-    sentence = "the quick brown fox jumps over the lazy dog. "
-    filler = sentence * max(1, int(k_tokens) * 100)
+    # Two characters per o200k token (" a", " b", ... are single tokens), so
+    # 300k tokens travel as ~600 KB: the first run's 4.5-chars-per-token prose
+    # (1.35 MB) made the gateway give up reading the body after 60 s (408
+    # user_request_timeout) before it ever judged the length. tiktoken, when
+    # installed, counts the filler exactly; otherwise the estimate is printed.
+    unit = " " + " ".join("abcdefghijklmnopqrstuvwxyz")
+    try:
+        import tiktoken  # type: ignore
+
+        encoding = tiktoken.get_encoding("o200k_base")
+        tokens_per_unit = len(encoding.encode(unit))
+    except Exception:  # noqa: BLE001 - tiktoken is optional; the estimate is close enough.
+        encoding = None
+        tokens_per_unit = 26
+    repeats = max(1, -(-int(k_tokens) * 1000 // tokens_per_unit))
+    filler = unit * repeats
+    counted = len(encoding.encode(filler)) if encoding is not None else repeats * tokens_per_unit
+    print(
+        f"[context-test] filler {len(filler):,} chars ~{counted:,} tokens "
+        f"({'tiktoken' if encoding is not None else 'estimated'}; base tier cap 272,000)"
+    )
     body = {
         "model": model,
         "input": [
@@ -381,12 +403,9 @@ def probe_context_test(api_base: str, token: str, *, model: str, k_tokens: int) 
         "reasoning": {"effort": "low"},
         "max_output_tokens": 32,
     }
-    print(
-        f"[context-test] POST {api_base}/responses model={model} filler~{k_tokens}k tokens "
-        f"({len(filler):,} chars) ..."
-    )
+    print(f"[context-test] POST {api_base}/responses model={model} ...")
     status, raw, elapsed = http("POST", f"{api_base}/responses", token=token, body=body, timeout=600)
-    print(f"[context-test] -> {status} ({elapsed:.1f}s)")
+    print(f"[context-test] -> {status} ({elapsed:.1f}s, ~{len(filler) / 1024 / max(elapsed, 0.1):.0f} KB/s if the time was the upload)")
     if status != 200:
         print("[context-test] body:", redact(raw[:800]) or "<empty>")
         return
@@ -459,6 +478,276 @@ def probe_chat(
     print(f"[chat:{label}] response.model={payload.get('model')!r} text={text.strip()!r} usage={json.dumps(usage)}")
 
 
+# Header sets for --discount-test, each sent with the model /auto picked. The
+# question: which of them makes Copilot bill the request in the auto pool (10%
+# off, "Auto: <model>" in the usage report) instead of as the plain model.
+# VS Code's HTTP chat POST (extensions/copilot chatMLFetcher.ts -> networking.ts
+# networkRequest) carries X-Request-Id, OpenAI-Intent, X-GitHub-Api-Version
+# 2026-01-09, X-Interaction-Id, X-Initiator, X-Interaction-Type and
+# X-Agent-Task-Id next to Copilot-Session-Token; the runtimes send only the
+# session token on top of their usual chat headers.
+EFP_CHAT_HEADERS = {"Openai-Intent": "conversation-edits", "x-initiator": "agent"}
+DISCOUNT_VARIANTS: dict[str, dict] = {
+    "baseline": {"session": False, "headers": {}, "about": "no session token (the plain model's price)"},
+    "efp": {"session": True, "headers": {}, "about": "session token only (what the runtimes send today)"},
+    "version-0801": {
+        "session": True,
+        "headers": {"X-GitHub-Api-Version": "2026-08-01"},
+        "about": "session token + the API version the runtimes send on /auto",
+    },
+    "version-0109": {
+        "session": True,
+        "headers": {"X-GitHub-Api-Version": "2026-01-09"},
+        "about": "session token + the API version VS Code sends on chat",
+    },
+    "vscode": {
+        "session": True,
+        "headers": {
+            "X-GitHub-Api-Version": "2026-01-09",
+            "Openai-Intent": "conversation-agent",
+            "X-Interaction-Type": "conversation-agent",
+            "x-initiator": "user",
+        },
+        "request_ids": True,
+        "about": "session token + VS Code's chat headers (version, request / interaction ids, interaction type)",
+    },
+}
+
+
+def _find_key(value, key: str):
+    """The first ``key`` found anywhere in a decoded JSON value, or None."""
+
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for child in value.values():
+            found = _find_key(child, key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_key(child, key)
+            if found is not None:
+                return found
+    return None
+
+
+def responses_stream(url: str, *, token: str, body: dict, extra: dict, timeout: float = 120.0):
+    """One streamed ``/responses`` call, the way the runtimes send it; returns the final response object.
+
+    The charge (``usage.copilot_usage.total_nano_aiu``) rides on the stream's
+    last event, so the events are read to the end and the last one carrying a
+    ``response`` wins.
+    """
+
+    headers = {"Authorization": f"Bearer {token}", **PLUGIN_HEADERS, "Content-Type": "application/json"}
+    headers.update(extra)
+    headers["Accept"] = "text/event-stream"
+    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    started = time.monotonic()
+    final = None
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and isinstance(event.get("response"), dict):
+                    final = event["response"]
+            return status, final, "", time.monotonic() - started
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        return exc.code, None, raw, time.monotonic() - started
+    except urllib.error.URLError as exc:
+        return 0, None, f"URLError: {exc.reason}", time.monotonic() - started
+
+
+def _default_tier_prices(*entries) -> dict | None:
+    """``billing.token_prices.default`` (credits per million tokens) from the first model entry that has it."""
+
+    for entry in entries:
+        billing = entry.get("billing") if isinstance(entry, dict) else None
+        prices = billing.get("token_prices") if isinstance(billing, dict) else None
+        tier = prices.get("default") if isinstance(prices, dict) else None
+        if isinstance(tier, dict) and tier.get("input_price") is not None and tier.get("output_price") is not None:
+            return tier
+    return None
+
+
+def _list_price_credits(usage: dict, prices: dict | None) -> float | None:
+    """What the usage costs at the model's published default-tier prices, in credits."""
+
+    if not prices:
+        return None
+    try:
+        input_price = float(prices["input_price"])
+        output_price = float(prices["output_price"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    cached_price = None
+    for key in ("cached_input_price", "cache_read_price", "cached_price", "input_cached_price", "cached_input"):
+        if prices.get(key) is not None:
+            cached_price = float(prices[key])
+            break
+    if cached_price is None:
+        cached_price = input_price / 10.0
+    details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+    prompt = int(usage.get("input_tokens") or 0)
+    cached = min(int(details.get("cached_tokens") or 0), prompt)
+    output = int(usage.get("output_tokens") or 0)
+    return ((prompt - cached) * input_price + cached * cached_price + output * output_price) / 1_000_000.0
+
+
+def probe_discount_test(
+    api_base: str,
+    token: str,
+    *,
+    prompt: str,
+    tier: str | None,
+    api_version: str | None,
+    variants: list[str],
+    repeat: int,
+) -> None:
+    """Is a request sent with the auto session token billed at the auto discount?
+
+    Routes once (``POST /auto``), then sends the same small ``/responses``
+    request with the picked model under each header set of DISCOUNT_VARIANTS
+    and compares what Copilot says it charged (``usage.copilot_usage
+    .total_nano_aiu``, 1 credit = 10^9 nano-AIU) with the model's list price
+    for the tokens used. ``baseline`` (no session token) is the plain model;
+    a variant whose charge per list-price credit is ~10% below the baseline's
+    is billed in the auto pool. Each request starts with a fresh nonce and
+    stays under 1,024 prompt tokens, so no prompt cache read or write skews
+    the comparison. Costs a few thousandths of a credit per request on Luna.
+    """
+
+    import uuid
+
+    decision = probe_auto_v2(api_base, token, prompt=prompt, tier=tier, api_version=api_version)
+    if decision is None:
+        sys.exit("[discount] /auto did not answer; nothing to compare")
+    selected = decision.get("selected_model") if isinstance(decision.get("selected_model"), dict) else {}
+    model = str(selected.get("id") or "")
+    session_token = decision.get("session_token")
+    if not model or not isinstance(session_token, str) or not session_token:
+        sys.exit("[discount] /auto answered without a model or a session token")
+    discounts = decision.get("discounted_costs") if isinstance(decision.get("discounted_costs"), dict) else {}
+    try:
+        expected_discount = float(discounts.get(model))
+    except (TypeError, ValueError):
+        expected_discount = 0.1
+        print(f"[discount] /auto names no discount for {model}; assuming the documented 10%")
+    prices = _default_tier_prices(selected)
+    if prices is None:
+        # /auto leaves token pricing unset on some seats; the catalog row has it.
+        extra = {"X-GitHub-Api-Version": api_version} if api_version else {}
+        status, raw, _ = http("GET", f"{api_base}/models", token=token, extra=extra)
+        if status == 200:
+            rows = json.loads(raw).get("data") or []
+            prices = _default_tier_prices(*[row for row in rows if isinstance(row, dict) and row.get("id") == model])
+    print(
+        f"[discount] model={model} expected auto discount={expected_discount:.0%} "
+        f"list prices (credits per 1M tokens)={json.dumps(prices, sort_keys=True) if prices else 'unknown'}"
+    )
+    print(f"[discount] started {time.strftime('%Y-%m-%d %H:%M:%S %z')}; variants: {', '.join(variants)}; repeat={repeat}")
+
+    filler = " ".join(["The quick brown fox jumps over the lazy dog."] * 25)
+    results: dict[str, list[tuple[float, float | None]]] = {}
+    for name in variants:
+        variant = DISCOUNT_VARIANTS[name]
+        print(f"[discount:{name}] {variant['about']}")
+        for attempt in range(repeat):
+            extra = dict(EFP_CHAT_HEADERS)
+            extra.update(variant["headers"])
+            request_id = str(uuid.uuid4())
+            if variant.get("request_ids"):
+                extra["X-Request-Id"] = request_id
+                extra["X-Agent-Task-Id"] = request_id
+                extra["X-Interaction-Id"] = str(uuid.uuid4())
+            if variant["session"]:
+                extra["Copilot-Session-Token"] = session_token
+            body = {
+                "model": model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                # The nonce comes first so no request shares a cacheable prefix with another.
+                                "text": f"nonce {uuid.uuid4()}\n{filler}\n\nReply with the single word pong.",
+                            }
+                        ],
+                    }
+                ],
+                "stream": True,
+                "reasoning": {"effort": "low"},
+                "max_output_tokens": 64,
+            }
+            status, final, raw, elapsed = responses_stream(f"{api_base}/responses", token=token, body=body, extra=extra)
+            label = f"[discount:{name}#{attempt + 1}]"
+            if status != 200 or final is None:
+                print(f"{label} -> {status} ({elapsed:.1f}s) {redact(raw[:400]).strip() or '<no final event>'}")
+                continue
+            usage = final.get("usage") if isinstance(final.get("usage"), dict) else {}
+            copilot_usage = _find_key(final, "copilot_usage")
+            nano = copilot_usage.get("total_nano_aiu") if isinstance(copilot_usage, dict) else None
+            details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+            tokens = (
+                f"in={usage.get('input_tokens')} cached={details.get('cached_tokens', 0)} out={usage.get('output_tokens')}"
+            )
+            if not isinstance(nano, (int, float)) or isinstance(nano, bool):
+                print(
+                    f"{label} -> 200 ({elapsed:.1f}s) response.model={final.get('model')!r} {tokens} "
+                    f"no copilot_usage.total_nano_aiu; usage={json.dumps(usage, sort_keys=True)}"
+                )
+                continue
+            charged = float(nano) / 1e9
+            listed = _list_price_credits(usage, prices)
+            ratio = f"{charged / listed:.4f}" if listed else "n/a"
+            print(
+                f"{label} -> 200 ({elapsed:.1f}s) response.model={final.get('model')!r} {tokens} "
+                f"charged={charged:.9f} credits list={'%.9f' % listed if listed else 'n/a'} charged/list={ratio}"
+            )
+            results.setdefault(name, []).append((charged, listed))
+
+    def charged_per_list(name: str) -> float | None:
+        rows = [(charged, listed) for charged, listed in results.get(name, []) if listed]
+        if not rows:
+            return None
+        return sum(charged for charged, _ in rows) / sum(listed for _, listed in rows)
+
+    print("[discount] summary (charged per list-price credit; the baseline is the plain model)")
+    baseline = charged_per_list("baseline")
+    for name in variants:
+        value = charged_per_list(name)
+        if value is None:
+            print(f"[discount]   {name:<13} no usable answer")
+            continue
+        if name == "baseline" or baseline is None:
+            verdict = "" if name == "baseline" else "no baseline to compare with (run it with baseline)"
+            print(f"[discount]   {name:<13} {value:.4f} {verdict}".rstrip())
+            continue
+        relative = value / baseline
+        if abs(relative - (1.0 - expected_discount)) <= 0.02:
+            verdict = "AUTO DISCOUNT APPLIED"
+        elif abs(relative - 1.0) <= 0.02:
+            verdict = "no discount (billed as the plain model)"
+        else:
+            verdict = "unclear"
+        print(f"[discount]   {name:<13} {value:.4f} = {relative:.3f} x baseline -> {verdict}")
+    if not any(listed for rows in results.values() for _, listed in rows):
+        print("[discount] no list price found for the model, so only the raw charges above can be compared by hand")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--chat", action="store_true", help="also send one tiny /responses request with the session token")
@@ -518,7 +807,21 @@ def main() -> None:
         help="send about K thousand tokens of filler to /responses with --model (default gpt-6.1-sol) to learn whether the "
         "gateway enforces the catalog's 272k prompt cap; costs input tokens, run once (e.g. 300)",
     )
-    parser.add_argument("--prompt", default="hey", help="prompt text for --auto-v2 (default: hey)")
+    parser.add_argument(
+        "--discount-test",
+        action="store_true",
+        help="route once on --prompt (POST /auto), then send the same small /responses request with the picked model under "
+        "several header sets and compare Copilot's own charge (copilot_usage.total_nano_aiu) with the list price: "
+        "tells whether the session token earns the auto discount, and which headers it needs",
+    )
+    parser.add_argument(
+        "--variants",
+        default=",".join(DISCOUNT_VARIANTS),
+        help="comma-separated header sets for --discount-test (default: all): " + ", ".join(DISCOUNT_VARIANTS),
+    )
+    parser.add_argument("--repeat", type=int, default=1, help="requests per variant for --discount-test (default 1)")
+    parser.add_argument("--tier", default="balance", help="auto tier for --discount-test (default balance; '' lets the server pick)")
+    parser.add_argument("--prompt", default="hey", help="prompt text for --auto-v2 and --discount-test (default: hey)")
     parser.add_argument("--tiers", default="balance,efficiency,intelligence,fast,", help="comma-separated tiers for --auto-v2; an empty item means no tier (server default)")
     parser.add_argument("--editor-version", default=None, help="override Editor-Version (e.g. vscode/1.117.2, your VS Code's real version)")
     parser.add_argument("--plugin-version", default=None, help="override Editor-Plugin-Version (e.g. copilot-chat/0.39.1, your Copilot Chat extension's version)")
@@ -556,6 +859,22 @@ def main() -> None:
 
     if args.context_test:
         probe_context_test(api_base, token, model=args.model or "gpt-6.1-sol", k_tokens=args.context_test)
+        return
+
+    if args.discount_test:
+        variants = [name.strip() for name in args.variants.split(",") if name.strip()]
+        unknown = [name for name in variants if name not in DISCOUNT_VARIANTS]
+        if unknown or not variants:
+            sys.exit(f"--variants: unknown {unknown}; choose from {', '.join(DISCOUNT_VARIANTS)}")
+        probe_discount_test(
+            api_base,
+            token,
+            prompt=args.prompt,
+            tier=(args.tier or "").strip() or None,
+            api_version=api_version,
+            variants=variants,
+            repeat=max(1, args.repeat),
+        )
         return
 
     if args.auto_v2:
